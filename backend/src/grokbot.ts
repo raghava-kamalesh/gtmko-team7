@@ -151,7 +151,7 @@ export async function searchXTrends(
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: process.env.XAI_MODEL ?? "grok-4.20-0309-non-reasoning",
+      model: process.env.XAI_MODEL ?? "grok-4.6",
       temperature: 0.2,
       max_tokens: 800,
       tools: [{ type: "x_search" }, { type: "web_search" }],

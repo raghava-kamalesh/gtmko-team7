@@ -48,7 +48,34 @@ describe("Grok assistant turn", () => {
     const firstCall = fetchMock.mock.calls.at(0) as [unknown, RequestInit] | undefined;
     const requestInit = firstCall?.[1] ?? {};
     const request = JSON.parse(String(requestInit.body ?? "{}")) as { model?: string };
-    expect(request.model).toBe(process.env.XAI_MODEL ?? "grok-4.20-0309-non-reasoning");
+    expect(request.model).toBe(process.env.XAI_MODEL ?? "grok-4.6");
+  });
+
+  it("falls back to catalog matches when Grok is unreachable", async () => {
+    const fetchMock = vi.fn(async () => {
+      throw new TypeError("fetch failed");
+    });
+    const result = await runAssistantTurn({
+      messages: [{ role: "user", content: "I need a 65 inch TV" }],
+      warehouse: { id: "w1", name: "Brooklyn" },
+    }, { fetch: fetchMock as unknown as typeof fetch, apiKey: "test-key" });
+    expect(result.askToView).toBe(true);
+    expect(result.recommendations.some((item) => /tv|bravia|television/i.test(`${item.id} ${item.name}`))).toBe(true);
+    expect(result.reply).toMatch(/product page|\$/i);
+    expect(result.cartActions).toEqual([]);
+  });
+
+  it("adds a catalog match when Grok is down and the member asks to add it", async () => {
+    const fetchMock = vi.fn(async () => {
+      throw new TypeError("fetch failed");
+    });
+    const result = await runAssistantTurn({
+      messages: [{ role: "user", content: "Add the Kirkland bath tissue" }],
+      warehouse: { id: "w1", name: "Brooklyn" },
+    }, { fetch: fetchMock as unknown as typeof fetch, apiKey: "test-key" });
+    expect(result.cartActions[0]?.productId).toBeTruthy();
+    expect(result.recommendations[0]?.name).toMatch(/bath tissue/i);
+    expect(result.cartActions[0]?.productId).toBe(result.recommendations[0]?.id);
   });
 
   it("runs a search tool round before answering", async () => {

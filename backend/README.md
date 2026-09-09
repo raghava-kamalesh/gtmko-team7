@@ -58,7 +58,7 @@ Authenticated routes require `Authorization: Bearer <token>`. Guest cart routes 
 ### Endpoints
 
 - `GET /health`
-- `POST /assistant/chat` with `{ messages, warehouse, cart?, image? }` — Kirk recommendations, cart actions, unmet-demand capture. Requires `XAI_API_KEY`.
+- `POST /assistant/chat` with `{ messages, warehouse, cart?, image? }` — Kirk recommendations, cart actions, unmet-demand capture. Requires `XAI_API_KEY`. If `api.x.ai` is unreachable, Kirk answers from the local catalog.
 - `POST /assistant/imagine` — Imagine category heroes or a cart/spread image
 - `POST /assistant/voice/session` and `WS /assistant/voice/live` — live Grok Voice proxy
 - `GET /kirk/home` — history category suggestions + Imagine heroes

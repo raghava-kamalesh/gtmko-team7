@@ -140,6 +140,15 @@ describe("Kirk Imagine and Grok tools", () => {
     expect(cartSpreadPrompt([{ name: "Bath Tissue", quantity: 1 }])).toMatch(/Bath Tissue/);
   });
 
+  it("returns a placeholder when Imagine is configured but xAI is unreachable", async () => {
+    const result = await generateImagine(
+      { kind: "cart_spread", prompt: "party table" },
+      { apiKey: "test-key", fetch: (async () => { throw new TypeError("fetch failed"); }) as unknown as typeof fetch },
+    );
+    expect(result.source).toBe("placeholder");
+    expect(result.url.startsWith("data:image/svg+xml")).toBe(true);
+  });
+
   it("returns cart add actions from the add_to_cart tool", async () => {
     const fetchMock = vi.fn(async () => grokReply({
       content: "I added Kirkland bath tissue to your cart.",

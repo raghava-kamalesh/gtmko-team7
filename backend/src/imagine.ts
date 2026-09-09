@@ -27,6 +27,15 @@ function mediaDir(): string {
     ?? join(dirname(fileURLToPath(import.meta.url)), "../data/imagine");
 }
 
+function placeholderResult(input: ImagineInput, model: string): ImagineResult {
+  return {
+    url: placeholderSvg(input.kind === "cart_spread" ? "Cart spread" : "Category hero", input.prompt.slice(0, 80)),
+    model,
+    source: "placeholder",
+    prompt: input.prompt,
+  };
+}
+
 export function placeholderSvg(title: string, detail: string): string {
   const svg = `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540">
@@ -88,12 +97,7 @@ export async function generateImagine(
   const model = deps.model ?? process.env.XAI_IMAGINE_MODEL ?? DEFAULT_MODEL;
   const persistId = deps.persistId ?? `img-${Date.now()}`;
   if (!apiKey) {
-    return {
-      url: placeholderSvg(input.kind === "cart_spread" ? "Cart spread" : "Category hero", input.prompt.slice(0, 80)),
-      model,
-      source: "placeholder",
-      prompt: input.prompt,
-    };
+    return placeholderResult(input, model);
   }
 
   const body: Record<string, unknown> = {
@@ -108,20 +112,25 @@ export async function generateImagine(
     body.images = input.referenceImageUrls.slice(0, 3);
   }
 
-  const response = await (deps.fetch ?? fetch)(process.env.XAI_IMAGES_URL ?? XAI_IMAGES_URL, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
-  });
+  let response: Response;
+  try {
+    response = await (deps.fetch ?? fetch)(process.env.XAI_IMAGES_URL ?? XAI_IMAGES_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+  } catch {
+    return placeholderResult(input, model);
+  }
   const payload = await response.json().catch(() => null) as {
     data?: Array<{ url?: string; b64_json?: string }>;
     error?: { message?: string };
   } | null;
   if (!response.ok) {
-    throw new ApiError(502, "IMAGINE_ERROR", payload?.error?.message ?? "Imagine could not generate this image");
+    return placeholderResult(input, model);
   }
   const first = payload?.data?.[0];
   if (first?.b64_json) {
