@@ -127,12 +127,19 @@ describe("Costco commerce journeys", () => {
     await user.click(within(panel).getByRole("button", { name: "Send" }));
     expect(await within(panel).findByText(/Sony 65-inch BRAVIA/)).toBeInTheDocument();
     expect(within(panel).getByText("I need a 65 inch TV")).toBeInTheDocument();
+    const log = panel.querySelector(".assistant-log");
+    expect(log).toBeTruthy();
+    const messages = [...log!.querySelectorAll(".assistant-msg")].map((node) => node.textContent ?? "");
+    expect(messages[0]).toContain("I need a 65 inch TV");
+    expect(messages[1]).toContain("Sony 65-inch BRAVIA");
     await user.click(within(panel).getByRole("button", { name: "Yes, show product page" }));
     expect(await screen.findByRole("heading", { name: /Sony 65" Class - BRAVIA 2 II Series/ })).toBeInTheDocument();
     expect(window.location.pathname).toBe("/product/9565020");
     const stillOpen = screen.getByRole("dialog", { name: "Kirk" });
     expect(within(stillOpen).getByText(/Opening the product page/)).toBeInTheDocument();
     expect(within(stillOpen).getByText("I need a 65 inch TV")).toBeInTheDocument();
+    const later = [...stillOpen.querySelectorAll(".assistant-msg")].map((node) => node.textContent ?? "");
+    expect(later.findIndex((text) => text.includes("Yes"))).toBeLessThan(later.findIndex((text) => /Opening the product page/.test(text)));
     expect(bodies[0]).toMatchObject({
       messages: [{ role: "user", content: "I need a 65 inch TV" }],
       warehouse: { name: "Brooklyn" },

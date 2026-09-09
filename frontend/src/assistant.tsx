@@ -38,6 +38,12 @@ const readLines = (): ChatLine[] => {
 
 const newId = () => (crypto.randomUUID ? crypto.randomUUID() : `line-${Date.now()}-${Math.random()}`);
 
+export function insertAfterLine(lines: ChatLine[], afterId: string | undefined, line: ChatLine): ChatLine[] {
+  const index = afterId ? lines.findIndex((item) => item.id === afterId) : -1;
+  if (index === -1) return [...lines, line];
+  return [...lines.slice(0, index + 1), line, ...lines.slice(index + 1)];
+}
+
 export function isAffirmative(text: string) {
   return /^(y|yes|yeah|yep|yup|sure|ok|okay|please|show me|open it|go ahead|do it)\b/i.test(text.trim());
 }
@@ -118,6 +124,7 @@ function AssistantWidget({ open, pending, onConsumed, onClose, onOpen }: {
   const voiceRef = useRef<KirkVoiceSession | null>(null);
   linesRef.current = lines;
 
+  const opened = useRef(false);
   useEffect(() => { localStorage.setItem(CHAT_KEY, JSON.stringify(lines)); }, [lines]);
   useEffect(() => { log.current?.scrollTo?.({ top: log.current.scrollHeight }); }, [lines, busy, open]);
 
@@ -127,21 +134,26 @@ function AssistantWidget({ open, pending, onConsumed, onClose, onOpen }: {
   const offerLine = [...lines].reverse().find((line) => line.awaitingView && line.productIds?.[0]);
   const offered = offerLine?.productIds?.[0] ? productById(offerLine.productIds[0]) : undefined;
 
-  const clearAwaiting = () => setLines((curr) => curr.map((line) => line.awaitingView ? { ...line, awaitingView: false } : line));
+  const commitLines = (next: ChatLine[]) => {
+    linesRef.current = next;
+    setLines(next);
+  };
 
-  const openProduct = (product: Product) => {
-    clearAwaiting();
-    setLines((curr) => [...curr, { id: newId(), role: "assistant", text: `Opening the product page for ${product.name}.` }]);
+  const clearAwaiting = (curr: ChatLine[]) => curr.map((line) => line.awaitingView ? { ...line, awaitingView: false } : line);
+
+  const openProduct = (product: Product, afterId?: string) => {
+    const base = clearAwaiting(linesRef.current);
+    commitLines(insertAfterLine(base, afterId, { id: newId(), role: "assistant", text: `Opening the product page for ${product.name}.` }));
     navigate(`/product/${product.id}`);
   };
 
-  const declineProduct = (product: Product) => {
-    clearAwaiting();
-    setLines((curr) => [...curr, {
+  const declineProduct = (product: Product, afterId?: string) => {
+    const base = clearAwaiting(linesRef.current);
+    commitLines(insertAfterLine(base, afterId, {
       id: newId(),
       role: "assistant",
       text: `No problem — we can keep looking. What else would you like instead of ${product.name}?`,
-    }]);
+    }));
   };
 
   const applyCartActions = (actions: Array<{ productId: string; quantity: number }> | undefined) => {
@@ -151,15 +163,18 @@ function AssistantWidget({ open, pending, onConsumed, onClose, onOpen }: {
   };
 
   useEffect(() => {
-    if (open) setLines(readLines());
+    if (open && !opened.current) setLines(readLines());
+    opened.current = open;
   }, [open]);
 
   const sendTurn = async (text: string, image?: { mimeType: string; data: string; preview: string }, options?: { userAlreadyListed?: boolean }) => {
     if (busy) return;
-    const history = options?.userAlreadyListed
-      ? readLines()
-      : [...linesRef.current, { id: newId(), role: "user" as const, text, imageUrl: image?.preview }];
-    setLines(history);
+    const existingUser = options?.userAlreadyListed
+      ? [...linesRef.current].reverse().find((line) => line.role === "user" && line.text === text)
+      : undefined;
+    const userLine = existingUser ?? { id: newId(), role: "user" as const, text, imageUrl: image?.preview };
+    if (!existingUser) commitLines([...linesRef.current, userLine]);
+    const history = linesRef.current;
     setBusy(true);
     try {
       const result = await sendAssistantChat({
@@ -184,20 +199,20 @@ function AssistantWidget({ open, pending, onConsumed, onClose, onOpen }: {
       if (result.unmetDemand && !/unmet demand/i.test(reply)) {
         reply = `${reply} I logged that as unmet demand for merch to source.`.trim();
       }
-      setLines((curr) => [...curr, {
+      commitLines(insertAfterLine(linesRef.current, userLine.id, {
         id: newId(),
         role: "assistant",
         text: reply,
         productIds: matched.map((item) => item.id),
         awaitingView: Boolean(primary),
         imagineUrl: result.imagineUrl,
-      }]);
+      }));
     } catch {
-      setLines((curr) => [...curr, {
+      commitLines(insertAfterLine(linesRef.current, userLine.id, {
         id: newId(),
         role: "assistant",
         text: "I couldn't reach Kirk just now. Check that the API has an XAI_API_KEY, then try again.",
-      }]);
+      }));
     } finally {
       setBusy(false);
     }
@@ -205,13 +220,15 @@ function AssistantWidget({ open, pending, onConsumed, onClose, onOpen }: {
 
   const handleUserText = async (text: string) => {
     if (offered && isAffirmative(text)) {
-      setLines((curr) => [...curr, { id: newId(), role: "user", text }]);
-      openProduct(offered);
+      const userLine = { id: newId(), role: "user" as const, text };
+      commitLines([...linesRef.current, userLine]);
+      openProduct(offered, userLine.id);
       return;
     }
     if (offered && isNegative(text)) {
-      setLines((curr) => [...curr, { id: newId(), role: "user", text }]);
-      declineProduct(offered);
+      const userLine = { id: newId(), role: "user" as const, text };
+      commitLines([...linesRef.current, userLine]);
+      declineProduct(offered, userLine.id);
       return;
     }
     await sendTurn(text);
@@ -249,20 +266,21 @@ function AssistantWidget({ open, pending, onConsumed, onClose, onOpen }: {
   const requestSpread = async () => {
     if (busy) return;
     setBusy(true);
-    setLines((curr) => [...curr, { id: newId(), role: "user", text: "Visualize my current cart as a party spread." }]);
+    const userLine = { id: newId(), role: "user" as const, text: "Visualize my current cart as a party spread." };
+    commitLines([...linesRef.current, userLine]);
     try {
       const result = await imagineCart(cart.map((item) => {
         const product = productById(item.productId);
         return { productId: item.productId, name: product?.name, brand: product?.brand, imageUrl: product?.image, quantity: item.quantity };
       }));
-      setLines((curr) => [...curr, {
+      commitLines(insertAfterLine(linesRef.current, userLine.id, {
         id: newId(),
         role: "assistant",
         text: cart.length ? "Here is an Imagine spread grounded in the SKUs in your cart." : "Add a few items first and I can picture the table.",
         imagineUrl: result.url,
-      }]);
+      }));
     } catch {
-      setLines((curr) => [...curr, { id: newId(), role: "assistant", text: "I couldn't generate the cart spread. Try again in a moment." }]);
+      commitLines(insertAfterLine(linesRef.current, userLine.id, { id: newId(), role: "assistant", text: "I couldn't generate the cart spread. Try again in a moment." }));
     } finally {
       setBusy(false);
     }
@@ -281,7 +299,7 @@ function AssistantWidget({ open, pending, onConsumed, onClose, onOpen }: {
       },
       onTranscript: (role, text) => {
         if (!text.trim()) return;
-        setLines((curr) => [...curr, { id: newId(), role, text }]);
+        commitLines([...linesRef.current, { id: newId(), role, text }]);
       },
       onTool: (name, args) => {
         if (name === "add_to_cart" && typeof args.product_id === "string") {
@@ -380,42 +398,48 @@ function AssistantWidget({ open, pending, onConsumed, onClose, onOpen }: {
         <button className="primary" type="submit">Send to engineering</button>
       </form>}
       {feedbackNote && <p className="kirk-feedback-note" role="status">{feedbackNote}</p>}
-      <div className="assistant-log" ref={log} aria-live="polite">
+      <div className="assistant-log" ref={log}>
         {lines.length === 0 && !busy && <p className="assistant-empty">Ask Kirk what you need. I can recommend warehouse items, add them to your cart, read a photo, or Imagine the spread.</p>}
         {lines.map((line) => {
           const recs = (line.productIds ?? []).map(productById).filter((item): item is Product => Boolean(item));
           const isOffer = line.awaitingView && offerLine?.id === line.id && offered;
           return (
-            <div className="assistant-turn" key={line.id}>
-              <p className={`bubble ${line.role}`}>{line.text}</p>
+            <article className={`assistant-msg is-${line.role}`} key={line.id}>
+              <p className="assistant-msg-text">{line.text}</p>
               {line.imageUrl && <img className="kirk-upload-preview" src={line.imageUrl} alt="Uploaded for Kirk" />}
               {line.imagineUrl && <img className="kirk-imagine" src={line.imagineUrl} alt="Imagine visualization" />}
-              {recs.length > 0 && <div className="assistant-chips">{recs.map((product) =>
-                <div className="assistant-chip-wrap" key={product.id}>
-                  <button type="button" className="assistant-chip" onClick={() => openProduct(product)}>
+              {recs.length > 0 && <div className="assistant-cards">{recs.map((product) =>
+                <div className="assistant-card" key={product.id}>
+                  <button type="button" className="assistant-chip" onClick={() => {
+                    const userLine = { id: newId(), role: "user" as const, text: `Open ${product.name}` };
+                    commitLines([...linesRef.current, userLine]);
+                    openProduct(product, userLine.id);
+                  }}>
                     <img src={product.image} alt="" />
                     <div>
                       <b>{product.name}</b>
                       <small>Member price ${(product.memberPrice || 0).toFixed(2)} · {warehouse.name}</small>
                     </div>
                   </button>
-                  <button type="button" className="primary" onClick={() => add(product.id)}>Add to cart</button>
+                  <button type="button" className="assistant-card-add" onClick={() => add(product.id)}>Add to cart</button>
                 </div>
               )}</div>}
               {isOffer && offered && <div className="assistant-actions">
                 <button type="button" className="primary" onClick={() => {
-                  setLines((curr) => [...curr, { id: newId(), role: "user", text: "Yes" }]);
-                  openProduct(offered);
+                  const userLine = { id: newId(), role: "user" as const, text: "Yes" };
+                  commitLines([...linesRef.current, userLine]);
+                  openProduct(offered, userLine.id);
                 }}>Yes, show product page</button>
                 <button type="button" className="secondary" onClick={() => {
-                  setLines((curr) => [...curr, { id: newId(), role: "user", text: "Not now" }]);
-                  declineProduct(offered);
+                  const userLine = { id: newId(), role: "user" as const, text: "Not now" };
+                  commitLines([...linesRef.current, userLine]);
+                  declineProduct(offered, userLine.id);
                 }}>Not now</button>
               </div>}
-            </div>
+            </article>
           );
         })}
-        {busy && <p className="bubble assistant is-pending">Looking through the warehouse catalog…</p>}
+        {busy && <p className="assistant-msg is-assistant is-pending">Looking through the warehouse catalog…</p>}
       </div>
       <form className="assistant-dock" onSubmit={submit}>
         <div className={`assistant-wave${voiceStatus === "live" ? " is-live" : ""}`} aria-hidden="true">{[8, 16, 28, 18, 34, 14, 24, 10, 20, 12].map((h, i) => <i key={i} style={{ height: h }} />)}</div>
