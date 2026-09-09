@@ -78,6 +78,19 @@ describe("Grok assistant turn", () => {
     expect(result.cartActions[0]?.productId).toBe(result.recommendations[0]?.id);
   });
 
+  it("captures unmet demand when Grok is down and the member was looking for something else", async () => {
+    const fetchMock = vi.fn(async () => {
+      throw new TypeError("fetch failed");
+    });
+    const result = await runAssistantTurn({
+      messages: [{ role: "user", content: "I was actually looking for a Japanese whisky gift set" }],
+      warehouse: { id: "w1", name: "Brooklyn" },
+    }, { fetch: fetchMock as unknown as typeof fetch, apiKey: "test-key" });
+    expect(result.recommendations).toEqual([]);
+    expect(result.unmetDemand?.rawText).toMatch(/whisky/i);
+    expect(result.reply).toMatch(/unmet demand/i);
+  });
+
   it("runs a search tool round before answering", async () => {
     const fetchMock = vi.fn(async (_url: unknown, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body ?? "{}"));

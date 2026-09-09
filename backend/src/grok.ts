@@ -453,13 +453,22 @@ function catalogFallbackTurn(
   last: ChatMessage,
   seeded: CatalogMatch[],
 ): AssistantTurnResult {
+  if (looksUnmet(last.content)) {
+    return assembleTurn(input, last, seeded, {
+      reply: "",
+      recommended: [],
+      cartActions: [],
+      unmetDemand: { rawText: last.content },
+      showCart: false,
+    });
+  }
   const inStock = seeded.filter((item) => item.inStock);
   const picks = (inStock.length ? inStock : seeded).slice(0, 3);
   return assembleTurn(input, last, seeded, {
     reply: "",
     recommended: picks,
     cartActions: looksBuyIntent(last.content) && picks[0] ? [{ productId: picks[0].id, quantity: 1 }] : [],
-    unmetDemand: looksUnmet(last.content) && !picks.length ? { rawText: last.content } : null,
+    unmetDemand: null,
     showCart: looksCartQuestion(last.content),
   });
 }
