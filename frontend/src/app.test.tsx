@@ -1,0 +1,185 @@
+import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import App from "./main";
+
+const open = (path = "/") => {
+  window.history.pushState({}, "", path);
+  return render(<App />);
+};
+
+describe("Costco commerce journeys", () => {
+  beforeEach(() => localStorage.clear());
+
+  it("selects and persists a warehouse", async () => {
+    const user = userEvent.setup(); open();
+    await user.click(screen.getByRole("button", { name: /My Warehouse/ }));
+    await user.type(screen.getByLabelText(/Search by city/), "Hackensack");
+    await user.click(screen.getByRole("button", { name: /Hackensack, NJ/ }));
+    expect(screen.getByText("Hackensack", { selector: "b" })).toBeInTheDocument();
+    expect(localStorage.getItem("costco-warehouse")).toContain("Hackensack");
+  });
+
+  it("renders stock for the selected warehouse and retains cart lines after change", async () => {
+    localStorage.setItem("costco-cart", JSON.stringify([{ productId: "3", quantity: 1 }]));
+    const user = userEvent.setup(); open("/cart");
+    expect(screen.getByText(/Unavailable at Brooklyn/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /My Warehouse/ }));
+    await user.click(screen.getByRole("button", { name: /Manhattan, NY/ }));
+    expect(screen.getByText(/In stock at Manhattan/)).toBeInTheDocument();
+    expect(screen.getByText(/MacBook Air/)).toBeInTheDocument();
+  });
+
+  it("adds products and updates cart quantity", async () => {
+    const user = userEvent.setup(); open("/product/1");
+    await user.click(screen.getAllByRole("button", { name: "Add to Cart" })[0]);
+    await user.click(screen.getByRole("link", { name: /Cart/ }));
+    expect(screen.getByText(/Bath Tissue/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Increase quantity" }));
+    expect(screen.getByText("2", { selector: ".quantity span" })).toBeInTheDocument();
+  });
+
+  it("guards checkout and returns to it after sign in", async () => {
+    localStorage.setItem("costco-cart", JSON.stringify([{ productId: "1", quantity: 1 }]));
+    const user = userEvent.setup(); open("/checkout");
+    expect(screen.getByRole("heading", { name: "Sign in" })).toBeInTheDocument();
+    await user.type(screen.getByLabelText("Email address"), "member@example.com");
+    await user.type(screen.getByLabelText("Password"), "secret1");
+    await user.click(screen.getByRole("button", { name: "Sign In" }));
+    expect(screen.getByRole("heading", { name: "Secure Checkout" })).toBeInTheDocument();
+  });
+
+  it("places an order and submits a return", async () => {
+    localStorage.setItem("costco-user", JSON.stringify({ id: "u1", email: "m@example.com", name: "Member" }));
+    localStorage.setItem("costco-cart", JSON.stringify([{ productId: "1", quantity: 1 }]));
+    const user = userEvent.setup(); open("/checkout");
+    for (const [label, value] of [["Name","Test Member"],["Address","1 Main St"],["City","Brooklyn"],["State","NY"],["Zip","11232"]]) await user.type(screen.getByLabelText(label), value);
+    await user.click(screen.getByRole("button", { name: /Continue/ }));
+    await user.type(screen.getByLabelText("Card number"), "4242 4242 4242 4242");
+    await user.type(screen.getByLabelText("Expiration"), "12/30");
+    await user.type(screen.getByLabelText("Security code"), "123");
+    await user.click(screen.getByRole("button", { name: "Place order" }));
+    expect(screen.getByText(/Thanks for your order/)).toBeInTheDocument();
+    await user.click(screen.getByRole("link", { name: "Return items" }));
+    await user.selectOptions(screen.getByLabelText("Reason"), "Changed my mind");
+    await user.click(screen.getByRole("button", { name: /Submit return/ }));
+    expect(within(screen.getByText("Return requested").closest(".notice")!).getByText("Return requested")).toBeInTheDocument();
+  });
+
+  it("lists Costco household catalog items", () => {
+    open("/category/household");
+    expect(screen.getByRole("heading", { name: "Household" })).toBeInTheDocument();
+    expect(screen.getByText("50 results")).toBeInTheDocument();
+    expect(screen.getByText(/Ultra Clean HE Liquid Laundry Detergent/)).toBeInTheDocument();
+  });
+
+  it("shows catalog specifications and per-warehouse stock on a product page", () => {
+    open("/product/100525846");
+    expect(screen.getByRole("heading", { name: /Ultra Clean HE Liquid Laundry Detergent/ })).toBeInTheDocument();
+    expect(screen.getByText("Item #100525846")).toBeInTheDocument();
+    expect(screen.getByText("194 fl oz")).toBeInTheDocument();
+    expect(screen.getAllByText("Brooklyn").length).toBeGreaterThan(0);
+    expect(screen.getByText("Manhattan")).toBeInTheDocument();
+    expect(screen.getAllByText(/\d+ on hand/).length).toBeGreaterThan(1);
+  });
+
+  it("expands the digital assistant on hover and opens the panel", async () => {
+    const user = userEvent.setup(); open();
+    const launch = screen.getByRole("button", { name: "Digital assistant" });
+    expect(screen.getByText(/Would you like to talk to the digital assistant/)).not.toBeVisible();
+    await user.hover(launch);
+    expect(screen.getByText(/Would you like to talk to the digital assistant/)).toBeVisible();
+    await user.click(launch);
+    expect(screen.getByRole("heading", { name: "Digital Assistant" })).toBeInTheDocument();
+  });
+
+  it("keeps a Grok transcript and opens a recommended product page after the member agrees", async () => {
+    const sony = {
+      id: "9565020",
+      name: "Sony 65\" Class - BRAVIA 2 II Series - 4K UHD Smart TV",
+      brand: "Sony",
+      memberPrice: 698,
+      category: "electronics",
+      inStock: true,
+    };
+    const bodies: unknown[] = [];
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/assistant/chat")) {
+        bodies.push(JSON.parse(String(init?.body ?? "{}")));
+        return new Response(JSON.stringify({
+          data: {
+            reply: "The Sony 65-inch BRAVIA is $698.00 and in stock at Brooklyn. Would you like to see the product page?",
+            recommendations: [sony],
+            askToView: true,
+          },
+        }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ error: { message: url } }), { status: 404 });
+    });
+    const user = userEvent.setup();
+    open();
+    await user.click(screen.getByRole("button", { name: "Digital assistant" }));
+    const panel = screen.getByRole("dialog", { name: "Digital Assistant" });
+    await user.type(within(panel).getByPlaceholderText(/Ask about items/), "I need a 65 inch TV");
+    await user.click(within(panel).getByRole("button", { name: "Send" }));
+    expect(await within(panel).findByText(/Sony 65-inch BRAVIA/)).toBeInTheDocument();
+    expect(within(panel).getByText("I need a 65 inch TV")).toBeInTheDocument();
+    await user.click(within(panel).getByRole("button", { name: "Yes, show product page" }));
+    expect(await screen.findByRole("heading", { name: /Sony 65" Class - BRAVIA 2 II Series/ })).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/product/9565020");
+    const stillOpen = screen.getByRole("dialog", { name: "Digital Assistant" });
+    expect(within(stillOpen).getByText(/Opening the product page/)).toBeInTheDocument();
+    expect(within(stillOpen).getByText("I need a 65 inch TV")).toBeInTheDocument();
+    expect(bodies[0]).toMatchObject({
+      messages: [{ role: "user", content: "I need a 65 inch TV" }],
+      warehouse: { name: "Brooklyn" },
+    });
+  });
+
+  it("restores the assistant transcript after the panel is closed", async () => {
+    localStorage.setItem("costco-assistant-chat", JSON.stringify([
+      { id: "u1", role: "user", text: "Need laundry detergent" },
+      { id: "a1", role: "assistant", text: "Kirkland Ultra Clean is in stock.", productIds: ["100525846"] },
+    ]));
+    const user = userEvent.setup();
+    open();
+    await user.click(screen.getByRole("button", { name: "Digital assistant" }));
+    const panel = screen.getByRole("dialog", { name: "Digital Assistant" });
+    expect(within(panel).getByText("Need laundry detergent")).toBeInTheDocument();
+    expect(within(panel).getByText(/Kirkland Ultra Clean/)).toBeInTheDocument();
+    await user.click(within(panel).getByRole("button", { name: "Close assistant" }));
+    await user.click(screen.getByRole("button", { name: "Digital assistant" }));
+    expect(within(screen.getByRole("dialog", { name: "Digital Assistant" })).getByText("Need laundry detergent")).toBeInTheDocument();
+  });
+
+  it("opens customer service from the banner and signs staff into operations", async () => {
+    const overview = {
+      openOrders: 2, deliveredOrders: 3, orderCount: 6, pendingReturns: 1, returnCount: 2,
+      lowStock: 4, outOfStock: 1, unitsOnHand: 1200, activeDiscounts: 3, recentOrders: [
+        { id: "order-2", orderNumber: "CST-2026-100002", status: "shipped", fulfillmentType: "shipping", subtotal: 183.49, tax: 18.81, discount: 0, total: 202.3, placedAt: "2026-08-20T00:00:00.000Z", member: { email: "alex.johnson@example.com", name: "Alex Johnson", membershipNumber: "111000000001" }, warehouse: { name: "Seattle Warehouse", city: "Seattle", state: "WA" } },
+      ],
+    };
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const json = (data: unknown, status = 200) => new Response(JSON.stringify({ data }), { status, headers: { "Content-Type": "application/json" } });
+      if (url.includes("/auth/staff-login")) {
+        return json({ token: "staff-token", member: { id: "staff-1", email: "service@costco.demo", profile: { firstName: "Priya", lastName: "Nair" } } });
+      }
+      if (url.includes("/admin/overview")) return json(overview);
+      return new Response(JSON.stringify({ error: { message: url } }), { status: 404 });
+    });
+    const user = userEvent.setup();
+    open();
+    await user.click(screen.getByRole("link", { name: "Customer Service" }));
+    expect(screen.getByRole("heading", { name: "Staff sign in" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Sign in to operations" }));
+    expect(await screen.findByRole("heading", { name: "Operations overview" })).toBeInTheDocument();
+    expect(screen.getByText("Priya Nair")).toBeInTheDocument();
+    expect(screen.getByText("CST-2026-100002")).toBeInTheDocument();
+  });
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
