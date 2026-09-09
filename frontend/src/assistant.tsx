@@ -181,8 +181,7 @@ function AssistantWidget({ open, pending, onConsumed, onClose, onOpen }: {
       if (primary && (result.askToView || matched.length) && !replyAsksToView(reply)) {
         reply = `${reply} ${viewQuestion(primary)}`.trim();
       }
-      if (result.unmetDemand) {
-        await captureKirkDemand({ rawText: result.unmetDemand.rawText, category: result.unmetDemand.category, memberKey }).catch(() => undefined);
+      if (result.unmetDemand && !/unmet demand/i.test(reply)) {
         reply = `${reply} I logged that as unmet demand for merch to source.`.trim();
       }
       setLines((curr) => [...curr, {
