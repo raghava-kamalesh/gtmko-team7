@@ -122,28 +122,47 @@ async function proxyVoiceSession(client: WebSocket, url: URL) {
   const model = process.env.XAI_VOICE_MODEL ?? VOICE_MODEL;
   const conversationId = url.searchParams.get("conversation_id");
   const upstreamUrl = `${process.env.XAI_VOICE_URL ?? VOICE_URL}?model=${encodeURIComponent(model)}${conversationId ? `&conversation_id=${encodeURIComponent(conversationId)}` : ""}`;
+  const queued: Array<{ data: WebSocket.RawData; binary: boolean }> = [];
   const upstream = new WebSocket(upstreamUrl, { headers: { Authorization: `Bearer ${apiKey}` } });
+  console.log(`voice: connecting upstream model=${model}`);
 
-  const forward = (from: WebSocket, to: WebSocket) => {
-    from.on("message", (data, isBinary) => {
-      if (to.readyState === WebSocket.OPEN) to.send(data, { binary: isBinary });
-    });
-    from.on("close", (code, reason) => closeVoicePeer(to, code, reason));
-    from.on("error", () => closeVoicePeer(to, 1011, "voice_proxy_error"));
+  const sendUpstream = (data: WebSocket.RawData, binary: boolean) => {
+    if (upstream.readyState === WebSocket.OPEN) {
+      upstream.send(data, { binary });
+      return;
+    }
+    queued.push({ data, binary });
   };
 
+  client.on("message", (data, isBinary) => sendUpstream(data, isBinary));
+  client.on("close", (code, reason) => closeVoicePeer(upstream, code, reason));
+  client.on("error", () => closeVoicePeer(upstream, 1011, "voice_proxy_error"));
+
   upstream.on("open", () => {
-    client.send(JSON.stringify({ type: "proxy.ready", model }));
+    console.log(`voice: upstream open queued=${queued.length}`);
+    for (const item of queued) {
+      if (upstream.readyState === WebSocket.OPEN) upstream.send(item.data, { binary: item.binary });
+    }
+    queued.length = 0;
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(JSON.stringify({ type: "proxy.ready", model }));
+    }
   });
-  upstream.on("error", () => {
+  upstream.on("message", (data, isBinary) => {
+    if (client.readyState === WebSocket.OPEN) client.send(data, { binary: isBinary });
+  });
+  upstream.on("close", (code, reason) => {
+    console.log(`voice: upstream close code=${code}`);
+    closeVoicePeer(client, code, reason);
+  });
+  upstream.on("error", (error) => {
+    console.log(`voice: upstream error ${error.message}`);
     if (client.readyState === WebSocket.OPEN) {
       client.send(JSON.stringify({
         type: "error",
         error: { code: "GROK_VOICE_ERROR", message: "Could not reach Grok Voice. Try again." },
       }));
     }
+    closeVoicePeer(client, 1011, "voice_proxy_error");
   });
-
-  forward(client, upstream);
-  forward(upstream, client);
 }
