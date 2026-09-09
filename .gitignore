@@ -1,8 +1,12 @@
 node_modules/
 dist/
 .data/
+backend/data/
 .env
 .env.local
 coverage/
 .DS_Store
 *.log
+*.tsbuildinfo
+frontend/vite.config.d.ts
+frontend/vite.config.js

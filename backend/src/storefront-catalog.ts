@@ -1,3 +1,4 @@
+import { inferDietaryTags, inferMemberOnly, inferPackSize } from "./catalog-meta.js";
 import { loadCostcoCatalog, warehouseQuantity } from "./catalog-seed.js";
 
 export type CatalogCard = {
@@ -8,6 +9,9 @@ export type CatalogCard = {
   memberPrice: number;
   description: string;
   stockByWarehouse: Record<string, number>;
+  dietaryTags: string[];
+  packSize: string | null;
+  memberOnly: boolean;
 };
 
 export type CatalogMatch = CatalogCard & { inStock: boolean; quantity: number };
@@ -52,6 +56,9 @@ function buildCatalog(): CatalogCard[] {
     memberPrice: Math.round(item.price * 0.92 * 100) / 100,
     description: item.description,
     stockByWarehouse: demoStock(item.id),
+    dietaryTags: inferDietaryTags(item.name, item.description, item.brand),
+    packSize: inferPackSize(item.name),
+    memberOnly: inferMemberOnly(item.brand),
   }));
   const catalog: CatalogCard[] = loadCostcoCatalog().map((item, index) => ({
     id: item.sku,
@@ -60,6 +67,9 @@ function buildCatalog(): CatalogCard[] {
     category: item.category,
     memberPrice: item.price,
     description: item.description,
+    dietaryTags: inferDietaryTags(item.name, item.description, item.brand),
+    packSize: inferPackSize(item.name, item.specs),
+    memberOnly: inferMemberOnly(item.brand, item.badge),
     stockByWarehouse: Object.fromEntries(
       WAREHOUSE_IDS.map((warehouseId, warehouseIndex) => [warehouseId, warehouseQuantity(index, warehouseIndex)]),
     ),
@@ -122,6 +132,9 @@ export function summarizeMatch(match: CatalogMatch): Record<string, unknown> {
     memberPrice: match.memberPrice,
     inStock: match.inStock,
     quantity: match.quantity,
+    dietaryTags: match.dietaryTags,
+    packSize: match.packSize,
+    memberOnly: match.memberOnly,
     description: match.description.slice(0, 180),
   };
 }

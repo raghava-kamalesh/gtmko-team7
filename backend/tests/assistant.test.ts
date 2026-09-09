@@ -45,7 +45,9 @@ describe("Grok assistant turn", () => {
     expect(result.recommendations[0]).toMatchObject({ id: "9565020", brand: "Sony" });
     expect(result.reply).toMatch(/product page/i);
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    const request = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body ?? "{}")) as { model?: string };
+    const firstCall = fetchMock.mock.calls.at(0) as [unknown, RequestInit] | undefined;
+    const requestInit = firstCall?.[1] ?? {};
+    const request = JSON.parse(String(requestInit.body ?? "{}")) as { model?: string };
     expect(request.model).toBe(process.env.XAI_MODEL ?? "grok-4.20-0309-non-reasoning");
   });
 

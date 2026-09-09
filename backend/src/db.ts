@@ -4,6 +4,7 @@ import { PGlite } from "@electric-sql/pglite";
 import { drizzle, type PgliteDatabase } from "drizzle-orm/pglite";
 import { count, eq } from "drizzle-orm";
 import { seedCostcoCatalog } from "./catalog-seed.js";
+import kirkMembers from "../../shared/kirk-members.json" with { type: "json" };
 import * as schema from "./schema.js";
 import { hashPassword } from "./security.js";
 
@@ -127,6 +128,46 @@ CREATE TABLE IF NOT EXISTS discount_applications (
   applied_by text NOT NULL REFERENCES members(id), reason text NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now()
 );
+CREATE TABLE IF NOT EXISTS kirk_category_heroes (
+  id text PRIMARY KEY, category text NOT NULL UNIQUE, label text NOT NULL, prompt text NOT NULL,
+  image_url text, source text NOT NULL DEFAULT 'placeholder',
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS kirk_feedback (
+  id text PRIMARY KEY, member_key text NOT NULL, type text NOT NULL, details text NOT NULL,
+  transcript jsonb NOT NULL, linear_issue_id text, linear_identifier text, linear_url text,
+  agent_job_id text, agent_url text, pr_url text, test_result text, summary text, wiring jsonb,
+  status text NOT NULL, created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS kirk_unmet_intents (
+  id text PRIMARY KEY, member_key text NOT NULL, raw_text text NOT NULL, category text,
+  attributes jsonb, created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS kirk_purchase_requests (
+  id text PRIMARY KEY, intent_id text REFERENCES kirk_unmet_intents(id), member_key text NOT NULL,
+  query text NOT NULL, category text, trends jsonb NOT NULL, vendors jsonb NOT NULL,
+  status text NOT NULL, decided_by text, decided_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS kirk_preorder_items (
+  id text PRIMARY KEY, purchase_request_id text NOT NULL REFERENCES kirk_purchase_requests(id),
+  name text NOT NULL, category text, vendor text, description text, image_url text,
+  estimated_price numeric(12,2), available boolean NOT NULL DEFAULT true,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS kirk_preorders (
+  id text PRIMARY KEY, item_id text NOT NULL REFERENCES kirk_preorder_items(id),
+  member_key text NOT NULL, created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS kirk_notifications (
+  id text PRIMARY KEY, member_key text NOT NULL, title text NOT NULL, body text NOT NULL,
+  item_id text, read boolean NOT NULL DEFAULT false, created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS kirk_outbound_mail (
+  id text PRIMARY KEY, to_addresses jsonb NOT NULL, subject text NOT NULL, body text NOT NULL,
+  provider text NOT NULL, status text NOT NULL, error text,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
 CREATE INDEX IF NOT EXISTS products_category_idx ON products(category_id);
 CREATE INDEX IF NOT EXISTS inventory_product_idx ON inventory(product_id);
 CREATE INDEX IF NOT EXISTS orders_member_idx ON orders(member_id);
@@ -183,10 +224,11 @@ export async function createDatabase(dataDir = process.env.DATABASE_PATH ?? "./d
   await client.exec(schemaSql);
   await client.exec(migrationSql);
   const db = drizzle(client, { schema });
-  const [{ total }] = await db.select({ total: count() }).from(schema.categories);
-  if (total === 0) await seedDatabase(db);
+  const [categoryCount] = await db.select({ total: count() }).from(schema.categories);
+  if ((categoryCount?.total ?? 0) === 0) await seedDatabase(db);
   await seedCostcoCatalog(db);
   await ensureOpsSeed(db);
+  await ensureKirkSeed(db);
   return { client, db, close: () => client.close() };
 }
 
@@ -383,6 +425,26 @@ async function ensureOpsSeed(db: Database): Promise<void> {
     appliedBy: "staff-1", reason: "TV advertised $25 lower at a nearby warehouse",
   });
   await db.update(schema.orders).set({ discount: "25.00", total: "369.34", updatedAt: new Date() }).where(eq(schema.orders.id, "order-1"));
+}
+
+async function ensureKirkSeed(db: Database): Promise<void> {
+  const existing = await db.select({ id: schema.kirkCategoryHeroes.id }).from(schema.kirkCategoryHeroes).limit(1);
+  if (existing.length) return;
+  const placeholders: Record<string, string> = {
+    grocery: "/images/category-1.svg",
+    household: "/images/category-2.svg",
+    electronics: "/images/category-3.svg",
+    furniture: "/images/category-4.svg",
+    outdoor: "/images/category-5.svg",
+  };
+  await db.insert(schema.kirkCategoryHeroes).values(kirkMembers.categories.map((category) => ({
+    id: `hero-${category.id}`,
+    category: category.id,
+    label: category.label,
+    prompt: category.prompt,
+    imageUrl: placeholders[category.id] ?? "/images/category-1.svg",
+    source: "placeholder",
+  })));
 }
 
 export async function resetDatabase(dataDir = process.env.DATABASE_PATH ?? "./data/costco"): Promise<void> {

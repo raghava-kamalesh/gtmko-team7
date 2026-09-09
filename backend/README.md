@@ -58,7 +58,14 @@ Authenticated routes require `Authorization: Bearer <token>`. Guest cart routes 
 ### Endpoints
 
 - `GET /health`
-- `POST /assistant/chat` with `{ messages: [{ role, content }], warehouse: { id, name } }` — Grok product recommendations. Requires `XAI_API_KEY`.
+- `POST /assistant/chat` with `{ messages, warehouse, cart?, image? }` — Kirk recommendations, cart actions, unmet-demand capture. Requires `XAI_API_KEY`.
+- `POST /assistant/imagine` — Imagine category heroes or a cart/spread image
+- `POST /assistant/voice/session` and `WS /assistant/voice/live` — live Grok Voice proxy
+- `GET /kirk/home` — history category suggestions + Imagine heroes
+- `POST /kirk/feedback` — member feedback → Linear + cloud agent + GrokBot summary
+- `POST /kirk/demand` — unmet intent + X sourcing queue
+- `GET /admin/kirk/purchases` and `POST /admin/kirk/purchases/:id/decide` — human purchase approval
+- `POST /kirk/preorders` — preorder after approval (email + in-app notify)
 - `GET /warehouses?q=&state=&zip=`
 - `GET /warehouses/:id`
 - `GET /categories`

@@ -1,9 +1,10 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Link, NavLink, useNavigate } from "react-router-dom";
+import { getKirkHome, markKirkNotificationRead, placeKirkPreorder } from "./api";
 import { AssistantProvider, HeadsetIcon, useAssistant } from "./assistant";
 import { warehouses } from "./data";
 import { useStore } from "./store";
-import type { Product } from "./types";
+import type { KirkNotification, Product } from "./types";
 
 const navLinks = [
   ["/category/grocery", "Grocery"],
@@ -57,11 +58,12 @@ export function Header() {
       <form className="search" onSubmit={search}>
         <IconSearch />
         <input aria-label="Search products" value={query} onChange={e => setQuery(e.target.value)} placeholder="Search Costco or ask with voice" />
-        <button type="button" className="search-voice" aria-label="Ask the digital assistant" onClick={() => openAssistant(query || undefined)}><HeadsetIcon size={18} /></button>
+        <button type="button" className="search-voice" aria-label="Ask Kirk" onClick={() => openAssistant(query || undefined)}><HeadsetIcon size={18} /></button>
         <button type="submit" className="search-go" aria-label="Submit search"><IconSearch light /></button>
       </form>
       <div className="head-links">
         <Link to={user ? "/account" : "/signin"}><IconUser /><span>{user ? `Hi, ${user.name}` : "Sign In"}<small>Account & Orders</small></span></Link>
+        <KirkBell />
         <Link to="/cart"><IconCart /><span>Cart<small>{cartCount} item{cartCount === 1 ? "" : "s"}</small></span></Link>
       </div>
     </div>
@@ -90,6 +92,43 @@ function WarehouseModal({ close }: { close: () => void }) {
     <input autoFocus aria-label="Search by city, state, or ZIP" placeholder="City, state, or ZIP" value={q} onChange={e => setQ(e.target.value)} />
     <div className="warehouse-list">{options.length ? options.map(w => <button key={w.id} onClick={() => { setWarehouse(w); close(); }}><b>{w.name}, {w.state}</b><span>{w.address}, {w.zip}</span><small>Open until 8:30 PM</small></button>) : <Empty title="No warehouses found" text="Try another city, state, or ZIP." />}</div>
   </section></div>;
+}
+
+function KirkBell() {
+  const { user } = useStore();
+  const [open, setOpen] = useState(false);
+  const [items, setItems] = useState<KirkNotification[]>([]);
+  const [note, setNote] = useState("");
+  const load = () => getKirkHome(user?.email ?? "demo").then((home) => setItems(home.notifications)).catch(() => undefined);
+  useEffect(() => { load(); }, [user?.email]);
+  const unread = items.filter((item) => !item.read).length;
+  return <div className="kirk-bell">
+    <button type="button" className="kirk-bell-btn" aria-label="Notifications" aria-expanded={open} onClick={() => setOpen((value) => !value)}>
+      <span aria-hidden="true">🔔</span>
+      {unread > 0 && <b>{unread}</b>}
+    </button>
+    {open && <div className="kirk-bell-panel" role="dialog" aria-label="In-app notifications">
+      {note && <p role="status">{note}</p>}
+      {items.length === 0 ? <p>No preorder notices yet.</p> : items.map((item) => (
+        <article key={item.id}>
+          <b>{item.title}</b>
+          <span>{item.body}</span>
+          <div>
+            {item.itemId && <button type="button" className="text-btn" onClick={async () => {
+              try {
+                await placeKirkPreorder(item.itemId!, user?.email ?? "demo");
+                setNote(`Preorder placed.`);
+              } catch { setNote("Preorder is not open yet."); }
+            }}>Preorder</button>}
+            {!item.read && <button type="button" className="text-btn" onClick={async () => {
+              await markKirkNotificationRead(item.id).catch(() => undefined);
+              load();
+            }}>Mark read</button>}
+          </div>
+        </article>
+      ))}
+    </div>}
+  </div>;
 }
 
 export function ProductCard({ product, compare, onCompare }: { product: Product; compare?: boolean; onCompare?: (p: Product) => void }) {

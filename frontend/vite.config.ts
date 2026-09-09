@@ -13,6 +13,7 @@ export default defineConfig({
       "/api": {
         target: process.env.API_PROXY_TARGET || "http://127.0.0.1:3001",
         changeOrigin: true,
+        ws: true,
         rewrite: (path) => path.replace(/^\/api/, ""),
       },
     },
