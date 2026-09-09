@@ -85,6 +85,18 @@ export function createVoiceSession(input: { warehouse: { id: string; name: strin
   };
 }
 
+/** ws rejects 1005/1006 and other reserved codes; forwarding them crashed the API. */
+export function closableVoiceCode(code: number): number {
+  if (code === 1000 || (code >= 3000 && code <= 4999)) return code;
+  return 1011;
+}
+
+export function closeVoicePeer(socket: WebSocket, code: number, reason?: Buffer | string) {
+  if (socket.readyState !== WebSocket.OPEN) return;
+  const text = typeof reason === "string" ? reason : reason?.toString() ?? "";
+  socket.close(closableVoiceCode(code), text.slice(0, 123));
+}
+
 export function attachVoiceProxy(server: Server) {
   const wss = new WebSocketServer({ noServer: true });
   server.on("upgrade", (request, socket, head) => {
@@ -116,12 +128,8 @@ async function proxyVoiceSession(client: WebSocket, url: URL) {
     from.on("message", (data, isBinary) => {
       if (to.readyState === WebSocket.OPEN) to.send(data, { binary: isBinary });
     });
-    from.on("close", (code, reason) => {
-      if (to.readyState === WebSocket.OPEN) to.close(code, reason.toString());
-    });
-    from.on("error", () => {
-      if (to.readyState === WebSocket.OPEN) to.close(1011, "voice_proxy_error");
-    });
+    from.on("close", (code, reason) => closeVoicePeer(to, code, reason));
+    from.on("error", () => closeVoicePeer(to, 1011, "voice_proxy_error"));
   };
 
   upstream.on("open", () => {

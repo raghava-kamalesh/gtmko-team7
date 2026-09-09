@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 import { createApp } from "../src/app.js";
 import { createDatabase, type DatabaseContext } from "../src/db.js";
 import { runAssistantTurn } from "../src/grok.js";
+import { closableVoiceCode } from "../src/voice.js";
 import { cartSpreadPrompt, generateImagine, placeholderSvg } from "../src/imagine.js";
 import { captureUnmetDemand, decidePurchase, getKirkHome } from "../src/kirk.js";
 import { wiringFromEnv } from "../src/grokbot.js";
@@ -112,6 +113,13 @@ describe("Kirk home and demand loop", () => {
     expect(payload.data.linearIdentifier).toMatch(/KIRK-/);
     expect(payload.data.status).toBe("ready_for_review");
     expect(payload.data.wiring.linear).toBe("mocked");
+  });
+
+  it("maps reserved websocket close codes so the voice proxy does not crash", () => {
+    expect(closableVoiceCode(1000)).toBe(1000);
+    expect(closableVoiceCode(4000)).toBe(4000);
+    expect(closableVoiceCode(1005)).toBe(1011);
+    expect(closableVoiceCode(1006)).toBe(1011);
   });
 
   it("mints a voice session descriptor", async () => {
