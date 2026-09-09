@@ -214,6 +214,34 @@ describe("Costco commerce journeys", () => {
     expect(bodies[0]).toMatchObject({ messages: [{ role: "user", content: expect.stringMatching(/snack table/i) }] });
   });
 
+  it("shows preorder notices when the notification bell is opened", async () => {
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+      if (String(input).includes("/kirk/home")) {
+        return new Response(JSON.stringify({
+          data: {
+            member: { displayName: "Alex Johnson", unmetInterests: [], history: [] },
+            suggestions: [],
+            preorderItems: [{ id: "po-1", name: "Japanese whisky gift set" }],
+            notifications: [{
+              id: "n1",
+              memberKey: "demo",
+              title: "Available to preorder",
+              body: "Japanese whisky gift set is available to preorder.",
+              itemId: "po-1",
+              read: false,
+            }],
+          },
+        }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ error: { message: String(input) } }), { status: 404 });
+    });
+    const user = userEvent.setup();
+    open();
+    await user.click(screen.getByRole("button", { name: "Notifications" }));
+    const panel = await screen.findByRole("dialog", { name: "In-app notifications" });
+    expect(await within(panel).findByText(/Japanese whisky gift set is available to preorder/)).toBeInTheDocument();
+  });
+
   it("opens customer service from the banner and signs staff into operations", async () => {
     const overview = {
       openOrders: 2, deliveredOrders: 3, orderCount: 6, pendingReturns: 1, returnCount: 2,

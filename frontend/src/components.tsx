@@ -103,7 +103,13 @@ function KirkBell() {
   useEffect(() => { load(); }, [user?.email]);
   const unread = items.filter((item) => !item.read).length;
   return <div className="kirk-bell">
-    <button type="button" className="kirk-bell-btn" aria-label="Notifications" aria-expanded={open} onClick={() => setOpen((value) => !value)}>
+    <button type="button" className="kirk-bell-btn" aria-label="Notifications" aria-expanded={open} onClick={() => {
+      setOpen((value) => {
+        const next = !value;
+        if (next) load();
+        return next;
+      });
+    }}>
       <span aria-hidden="true">🔔</span>
       {unread > 0 && <b>{unread}</b>}
     </button>

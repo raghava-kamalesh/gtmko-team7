@@ -86,6 +86,9 @@ describe("Kirk home and demand loop", () => {
     expect(home.preorderItems.length).toBeGreaterThan(0);
     expect(home.notifications.some((row) => /preorder/i.test(row.body))).toBe(true);
 
+    const guestHome = await json(await app.request("/kirk/home?memberKey=demo", { headers: auth }));
+    expect(guestHome.data.notifications.some((row: { body: string }) => /preorder/i.test(row.body))).toBe(true);
+
     const mail = await json(await app.request("/admin/kirk/mail", { headers: auth }));
     expect(mail.data[0].toAddresses).toEqual(expect.arrayContaining([
       "raghava.kamalesh@anysphere.co",

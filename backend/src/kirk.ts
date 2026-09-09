@@ -33,6 +33,30 @@ export function resolveMember(memberKey: string): MemberSeed {
   return members[memberKey] ?? members[memberKey.toLowerCase()] ?? members.demo!;
 }
 
+/** Guest "demo" and Alex's email are the same seeded member. Staff emails stay distinct. */
+export function memberKeyAliases(memberKey: string): string[] {
+  const raw = memberKey.trim() || "demo";
+  const lower = raw.toLowerCase();
+  const aliases = new Set<string>([raw, lower]);
+  const seed = members[raw] ?? members[lower];
+  if (lower === "demo" || seed === members.demo) {
+    aliases.add("demo");
+    const email = members.demo?.email;
+    if (email) {
+      aliases.add(email);
+      aliases.add(email.toLowerCase());
+    }
+  }
+  if (seed?.email) {
+    aliases.add(seed.email);
+    aliases.add(seed.email.toLowerCase());
+    for (const [key, value] of Object.entries(members)) {
+      if (value === seed) aliases.add(key);
+    }
+  }
+  return [...aliases];
+}
+
 export function historyFor(memberKey: string) {
   const profile = resolveMember(memberKey);
   const ids = profile.historyCategoryIds;
@@ -56,7 +80,7 @@ export async function getKirkHome(db: Database, memberKey: string) {
     };
   });
   const preorderRows = await db.select().from(kirkPreorderItems).where(eq(kirkPreorderItems.available, true)).orderBy(desc(kirkPreorderItems.createdAt));
-  const notifications = await db.select().from(kirkNotifications).where(eq(kirkNotifications.memberKey, memberKey)).orderBy(desc(kirkNotifications.createdAt)).limit(20);
+  const notifications = await db.select().from(kirkNotifications).where(inArray(kirkNotifications.memberKey, memberKeyAliases(memberKey))).orderBy(desc(kirkNotifications.createdAt)).limit(20);
   return {
     member: {
       key: memberKey,
@@ -273,12 +297,14 @@ export async function placePreorder(db: Database, input: { itemId: string; membe
 }
 
 export async function listNotifications(db: Database, memberKey: string) {
-  return db.select().from(kirkNotifications).where(eq(kirkNotifications.memberKey, memberKey)).orderBy(desc(kirkNotifications.createdAt));
+  return db.select().from(kirkNotifications).where(inArray(kirkNotifications.memberKey, memberKeyAliases(memberKey))).orderBy(desc(kirkNotifications.createdAt));
 }
 
 export async function markNotificationRead(db: Database, id: string, memberKey: string) {
   const [updated] = await db.update(kirkNotifications).set({ read: true }).where(eq(kirkNotifications.id, id)).returning();
-  if (!updated || updated.memberKey !== memberKey) throw new ApiError(404, "NOTIFICATION_NOT_FOUND", "Notification was not found");
+  if (!updated || !memberKeyAliases(memberKey).includes(updated.memberKey)) {
+    throw new ApiError(404, "NOTIFICATION_NOT_FOUND", "Notification was not found");
+  }
   return updated;
 }
 

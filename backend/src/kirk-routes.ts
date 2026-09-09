@@ -25,6 +25,12 @@ import { createVoiceSession } from "./voice.js";
 
 type Member = { id: string; email: string; role?: string | null };
 
+function explicitMemberKey(body: Record<string, unknown> | undefined, query: string | undefined): string | undefined {
+  const fromBody = typeof body?.memberKey === "string" ? body.memberKey.trim() : "";
+  const fromQuery = query?.trim() ?? "";
+  return fromBody || fromQuery || undefined;
+}
+
 export function registerKirkRoutes(
   app: Hono<{ Variables: { member: Member } }>,
   context: DatabaseContext,
@@ -35,10 +41,14 @@ export function registerKirkRoutes(
   const { db } = context;
 
   const keyFrom = async (c: { req: { header: (name: string) => string | undefined; query: (name: string) => string | undefined } }, body?: Record<string, unknown>) => {
+    const explicit = explicitMemberKey(body, c.req.query("memberKey"));
+    if (explicit) return memberKeyFrom({ email: explicit });
     const member = await auth.optionalMember(c).catch(() => null);
-    return memberKeyFrom({
-      email: member?.email ?? (typeof body?.memberKey === "string" ? body.memberKey : c.req.query("memberKey")),
-    });
+    // Ops sessions attach a staff bearer token to every api() call; do not treat that as the shopper.
+    if (member?.email && (member.role ?? "member") !== "staff") {
+      return memberKeyFrom({ email: member.email });
+    }
+    return "demo";
   };
 
   app.get("/kirk/home", async (c) => {
