@@ -1,0 +1,90 @@
+{
+  "notifyRecipients": [
+    "raghava.kamalesh@anysphere.co",
+    "pavan@anysphere.co",
+    "anirudh.suri@anysphere.com",
+    "alistair.jarrett@anysphere.co"
+  ],
+  "categories": [
+    {
+      "id": "grocery",
+      "label": "Grocery & snacks",
+      "prompt": "Stock a game-day snack table for 8 people, Kirkland-first, keep it under $80.",
+      "reason": "Bought chips, salsa, and sparkling water in the last 3 trips"
+    },
+    {
+      "id": "household",
+      "label": "Household staples",
+      "prompt": "Restock Kirkland laundry and paper for a family of 4. Prefer warehouse pack sizes already in my history.",
+      "reason": "Repeats bath tissue and Ultra Clean detergent"
+    },
+    {
+      "id": "electronics",
+      "label": "Electronics",
+      "prompt": "I need a 65-inch 4K TV under $800 that is in stock at my warehouse. Compare Kirkland-adjacent value picks.",
+      "reason": "Browsed TVs after buying HDMI cables"
+    },
+    {
+      "id": "furniture",
+      "label": "Furniture",
+      "prompt": "Find a sectional or sofa that fits a small apartment, delivery included, around $1,200.",
+      "reason": "Viewed sectionals after a mattress purchase"
+    },
+    {
+      "id": "outdoor",
+      "label": "Patio & outdoor",
+      "prompt": "Build a backyard grill setup for 8 people. I already own a folding table.",
+      "reason": "Seasonal browse: grills and patio after July 4th"
+    }
+  ],
+  "members": {
+    "demo": {
+      "displayName": "Alex Johnson",
+      "email": "alex.johnson@example.com",
+      "historyCategoryIds": ["grocery", "household", "electronics", "furniture", "outdoor"],
+      "unmetInterests": [
+        { "text": "Japanese whisky gift set", "category": "grocery" },
+        { "text": "14-inch carbon steel wok", "category": "household" }
+      ]
+    },
+    "alex.johnson@example.com": {
+      "displayName": "Alex Johnson",
+      "email": "alex.johnson@example.com",
+      "historyCategoryIds": ["grocery", "household", "electronics", "furniture", "outdoor"],
+      "unmetInterests": [
+        { "text": "Japanese whisky gift set", "category": "grocery" },
+        { "text": "14-inch carbon steel wok", "category": "household" }
+      ]
+    },
+    "jamie.chen@example.com": {
+      "displayName": "Jamie Chen",
+      "email": "jamie.chen@example.com",
+      "historyCategoryIds": ["household", "grocery", "electronics"],
+      "unmetInterests": [
+        { "text": "Fragrance-free baby wipes in a warehouse case", "category": "household" }
+      ]
+    },
+    "morgan.davis@example.com": {
+      "displayName": "Morgan Davis",
+      "email": "morgan.davis@example.com",
+      "historyCategoryIds": ["furniture", "electronics", "outdoor"],
+      "unmetInterests": [
+        { "text": "King hybrid mattress with cooling cover", "category": "furniture" }
+      ]
+    },
+    "taylor.smith@example.com": {
+      "displayName": "Taylor Smith",
+      "email": "taylor.smith@example.com",
+      "historyCategoryIds": ["grocery", "outdoor", "household"],
+      "unmetInterests": []
+    },
+    "casey.martinez@example.com": {
+      "displayName": "Casey Martinez",
+      "email": "casey.martinez@example.com",
+      "historyCategoryIds": ["electronics", "grocery", "household"],
+      "unmetInterests": [
+        { "text": "Noise-cancelling headphones under $200", "category": "electronics" }
+      ]
+    }
+  }
+}

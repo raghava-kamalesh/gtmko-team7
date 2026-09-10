@@ -2,9 +2,11 @@
 
 An internal demonstration storefront inspired by Costco.com. It includes a
 warehouse-aware catalog, member accounts, cart and checkout, order tracking,
-and return or replacement workflows. Customer service staff can open the
-operations console from **Customer Service** in the top banner to manage
-warehouse stock, orders, returns, and discretionary discounts.
+return or replacement workflows, and **Kirk**, a multimodal shopping assistant
+(chat, live Grok Voice, image upload, and Imagine). Customer service staff can
+open the operations console from **Customer Service** in the top banner to
+manage warehouse stock, orders, returns, discretionary discounts, and the Kirk
+merch purchase queue.
 
 This project is an independent prototype. It is not affiliated with, endorsed
 by, or operated by Costco Wholesale Corporation. All transactions and member

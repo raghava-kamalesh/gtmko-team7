@@ -1,4 +1,9 @@
 import {
+  inferDietaryTags,
+  inferMemberOnly,
+  inferPackSize,
+} from "./catalog-meta.js";
+import {
   getCatalogById,
   searchStorefrontCatalog,
   summarizeMatch,
@@ -16,11 +21,19 @@ export class AssistantError extends Error {
   }
 }
 
-export type ChatMessage = { role: "user" | "assistant"; content: string };
+export type ChatMessage = {
+  role: "user" | "assistant";
+  content: string;
+  image?: { mimeType: string; data: string };
+};
+
+export type AssistantCartLine = { productId: string; name?: string; brand?: string; quantity: number };
 
 export type AssistantTurnInput = {
   messages: ChatMessage[];
   warehouse: { id: string; name: string };
+  cart?: AssistantCartLine[];
+  memberKey?: string;
 };
 
 export type RecommendedProduct = {
@@ -30,12 +43,23 @@ export type RecommendedProduct = {
   memberPrice: number;
   category: string;
   inStock: boolean;
+  dietaryTags: string[];
+  packSize: string | null;
+  memberOnly: boolean;
 };
+
+export type CartAction = { productId: string; quantity: number };
+
+export type UnmetDemandCapture = { rawText: string; category?: string; attributes?: Record<string, unknown> };
 
 export type AssistantTurnResult = {
   reply: string;
   recommendations: RecommendedProduct[];
   askToView: boolean;
+  askToRequestInventory: boolean;
+  cartActions: CartAction[];
+  unmetDemand: UnmetDemandCapture | null;
+  cartSummary: { itemCount: number; lines: AssistantCartLine[] } | null;
 };
 
 type GrokToolCall = {
@@ -56,7 +80,7 @@ type GrokResponse = {
 };
 
 const XAI_CHAT_URL = "https://api.x.ai/v1/chat/completions";
-const DEFAULT_MODEL = "grok-4.20-0309-non-reasoning";
+const DEFAULT_MODEL = "grok-4.6";
 const MAX_TOOL_ROUNDS = 4;
 
 const tools = [
@@ -97,6 +121,45 @@ const tools = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "add_to_cart",
+      description: "Add a recommended catalog product to the member cart.",
+      parameters: {
+        type: "object",
+        properties: {
+          product_id: { type: "string" },
+          quantity: { type: "integer", minimum: 1, maximum: 12 },
+        },
+        required: ["product_id"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "capture_unmet_demand",
+      description: "Call only after the member agrees to request a missing product, or when they describe the item they want added to inventory.",
+      parameters: {
+        type: "object",
+        properties: {
+          raw_text: { type: "string" },
+          category: { type: "string" },
+          attributes: { type: "object" },
+        },
+        required: ["raw_text"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "show_cart_summary",
+      description: "Show the current cart when the member asks what is in it or after adding items.",
+      parameters: { type: "object", properties: {} },
+    },
+  },
 ];
 
 function textFromContent(content: unknown): string {
@@ -132,6 +195,9 @@ function toRecommendation(match: CatalogMatch): RecommendedProduct {
     memberPrice: match.memberPrice,
     category: match.category,
     inStock: match.inStock,
+    dietaryTags: inferDietaryTags(match.name, match.description, match.brand),
+    packSize: inferPackSize(match.name),
+    memberOnly: inferMemberOnly(match.brand),
   };
 }
 
@@ -155,17 +221,28 @@ function inferFromText(text: string, candidates: CatalogMatch[]): CatalogMatch[]
     .slice(0, 3);
 }
 
-function systemPrompt(warehouse: { id: string; name: string }, matches: CatalogMatch[]): string {
+function systemPrompt(
+  warehouse: { id: string; name: string },
+  matches: CatalogMatch[],
+  cart: AssistantCartLine[] = [],
+): string {
   const lines = matches.map((item) => (
     `- id=${item.id} | ${item.name} | ${item.brand} | $${item.memberPrice.toFixed(2)} | ${item.inStock ? `${item.quantity} in stock` : "out of stock"} at ${warehouse.name}`
   ));
+  const cartLines = cart.map((item) => `- ${item.quantity}× ${item.name ?? item.productId}`);
   return [
-    "You are the Costco digital shopping assistant for this demo storefront.",
+    "You are Kirk, the Costco warehouse shopping assistant for this demo storefront.",
     "Recommend only products that appear in the catalog matches or search_catalog results. Never invent items, prices, or ids.",
     `The member's selected warehouse is ${warehouse.name} (id ${warehouse.id}). Use that stock when you mention availability.`,
+    "Honor constraints: budget, party size, diet tags, Kirkland-first, pack size, and warehouse stock.",
     "When you recommend one or more products, call recommend_products with those ids.",
-    "After you recommend a product, ask if they would like to see the product page. Do not say you opened it yourself.",
+    "When the member wants to buy a recommended item, call add_to_cart.",
+    "If search_catalog finds nothing they asked for, say we do not carry it and ask if they want to request it be added to inventory. Do not call capture_unmet_demand until they agree or they describe the missing item.",
+    "When they ask about the cart, call show_cart_summary.",
+    "After you recommend a product, ask if they would like to see the product page or add it to the cart. Do not say you opened it yourself.",
     "Keep replies concise and conversational. Mention member price and warehouse stock when you have them.",
+    "If the user sent a photo, infer the scene (pantry, recipe, snack table, product) and recommend complements from the catalog.",
+    cartLines.length ? `Current cart:\n${cartLines.join("\n")}` : "The cart is empty.",
     lines.length ? `Catalog matches for this turn:\n${lines.join("\n")}` : "No catalog matches were preselected. Use search_catalog.",
   ].join("\n\n");
 }
@@ -230,12 +307,24 @@ export async function runAssistantTurn(
     throw new AssistantError(400, "VALIDATION_ERROR", "The last message must come from the user");
   }
   const warehouseId = input.warehouse.id || "w1";
-  const seeded = searchStorefrontCatalog(last.content, { warehouseId, limit: 6 });
+  const searchText = last.image ? `${last.content} pantry recipe snack table product photo` : last.content;
+  const seeded = searchStorefrontCatalog(searchText, { warehouseId, limit: 6 });
   const grokMessages: unknown[] = [
-    { role: "system", content: systemPrompt(input.warehouse, seeded) },
-    ...input.messages.map((message) => ({ role: message.role, content: message.content })),
+    { role: "system", content: systemPrompt(input.warehouse, seeded, input.cart ?? []) },
+    ...input.messages.map((message) => ({
+      role: message.role,
+      content: message.image
+        ? [
+            { type: "text", text: message.content },
+            { type: "image_url", image_url: { url: `data:${message.image.mimeType};base64,${message.image.data}` } },
+          ]
+        : message.content,
+    })),
   ];
   const recommended: CatalogMatch[] = [];
+  const cartActions: CartAction[] = [];
+  let unmetDemand: UnmetDemandCapture | null = null;
+  let showCart = false;
   let reply = "";
   const runtime = {
     fetch: deps.fetch ?? fetch,
@@ -244,50 +333,218 @@ export async function runAssistantTurn(
     apiUrl: deps.apiUrl ?? process.env.XAI_API_URL ?? XAI_CHAT_URL,
   };
 
-  for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
-    const message = await complete(grokMessages, runtime);
-    const content = textFromContent(message.content).trim();
-    if (content) reply = content;
-    const calls = message.tool_calls ?? [];
-    if (!calls.length) break;
-    grokMessages.push({
-      role: "assistant",
-      content: message.content ?? "",
-      tool_calls: calls,
-    });
-    for (const call of calls) {
-      const name = call.function?.name ?? "";
-      const args = parseArgs(call.function?.arguments);
-      let output: unknown = { error: `Unknown tool ${name}` };
-      if (name === "search_catalog") {
-        const query = String(args.query ?? last.content);
-        const category = typeof args.category === "string" ? args.category : undefined;
-        const limit = typeof args.limit === "number" ? args.limit : 6;
-        output = searchStorefrontCatalog(query, { category, limit, warehouseId }).map(summarizeMatch);
-      } else if (name === "recommend_products") {
-        const ids = Array.isArray(args.product_ids) ? args.product_ids.map((id) => String(id)) : [];
-        const resolved = resolveIds(ids, warehouseId);
-        recommended.push(...resolved);
-        output = { ok: true, products: resolved.map(summarizeMatch) };
+  try {
+    for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
+      const message = await complete(grokMessages, runtime);
+      const content = textFromContent(message.content).trim();
+      if (content) reply = content;
+      const calls = message.tool_calls ?? [];
+      if (!calls.length) break;
+      grokMessages.push({
+        role: "assistant",
+        content: message.content ?? "",
+        tool_calls: calls,
+      });
+      for (const call of calls) {
+        const name = call.function?.name ?? "";
+        const args = parseArgs(call.function?.arguments);
+        let output: unknown = { error: `Unknown tool ${name}` };
+        if (name === "search_catalog") {
+          const query = String(args.query ?? last.content);
+          const category = typeof args.category === "string" ? args.category : undefined;
+          const limit = typeof args.limit === "number" ? args.limit : 6;
+          output = searchStorefrontCatalog(query, { category, limit, warehouseId }).map(summarizeMatch);
+        } else if (name === "recommend_products") {
+          const ids = Array.isArray(args.product_ids) ? args.product_ids.map((id) => String(id)) : [];
+          const resolved = resolveIds(ids, warehouseId);
+          recommended.push(...resolved);
+          output = { ok: true, products: resolved.map(summarizeMatch) };
+        } else if (name === "add_to_cart") {
+          const productId = String(args.product_id ?? "");
+          const quantity = typeof args.quantity === "number" ? Math.max(1, Math.min(12, args.quantity)) : 1;
+          const resolved = resolveIds([productId], warehouseId);
+          if (resolved[0]) {
+            recommended.push(resolved[0]);
+            cartActions.push({ productId: resolved[0].id, quantity });
+            output = { ok: true, added: summarizeMatch(resolved[0]), quantity };
+          } else {
+            output = { ok: false, error: "Unknown product id" };
+          }
+        } else if (name === "capture_unmet_demand") {
+          unmetDemand = {
+            rawText: String(args.raw_text ?? last.content),
+            category: typeof args.category === "string" ? args.category : undefined,
+            attributes: args.attributes && typeof args.attributes === "object" ? args.attributes as Record<string, unknown> : undefined,
+          };
+          output = { ok: true, queued: true };
+        } else if (name === "show_cart_summary") {
+          showCart = true;
+          output = { ok: true, cart: input.cart ?? [] };
+        }
+        grokMessages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(output) });
       }
-      grokMessages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(output) });
+      if (reply && recommended.length) break;
     }
-    if (reply && recommended.length) break;
+  } catch (error) {
+    // Restricted clouds often block api.x.ai; keep Kirk usable from the local catalog.
+    if (error instanceof AssistantError && (error.code === "GROK_ERROR" || error.code === "GROK_TIMEOUT")) {
+      return catalogFallbackTurn(input, last, seeded);
+    }
+    throw error;
   }
 
-  const inferred = recommended.length ? recommended : inferFromText(reply, seeded);
+  return assembleTurn(input, last, seeded, { reply, recommended, cartActions, unmetDemand, showCart });
+}
+
+function looksUnmet(text: string): boolean {
+  return /i was actually looking|nothing (fits|matches)|you don'?t have|not what i (wanted|meant)|wanted something else/i.test(text);
+}
+
+export function looksLikeProductSeek(text: string): boolean {
+  const trimmed = text.trim();
+  if (/^(hi|hello|hey|thanks|thank you|ok|okay)\b/i.test(trimmed)) return false;
+  if (looksUnmet(trimmed)) return true;
+  return /do you (have|sell|carry)|looking for|i (need|want|wish)|can you (find|source|get)|gift set|i('d| would) like|is there (a|any)|got any|carry any/i.test(trimmed);
+}
+
+export function assistantOfferedInventoryRequest(messages: ChatMessage[]): boolean {
+  return messages.some((message, index) => (
+    message.role === "assistant"
+    && index < messages.length - 1
+    && /request (it |this |a product )?(be )?added|added to inventory|request .*inventor|describe (exactly )?what you want/i.test(message.content)
+  ));
+}
+
+export function isInventoryDecline(text: string): boolean {
+  return /^(n|no|nope|nah|not now|no thanks|no thank you)\b/i.test(text.trim());
+}
+
+export function isInventoryAccept(text: string): boolean {
+  return /^(y|yes|yeah|yep|yup|sure|ok|okay|please|do it|request it|add it)\b/i.test(text.trim())
+    || /request it|add (it|this) to inventory|please add/i.test(text);
+}
+
+export function inventoryRequestPrompt(query: string): string {
+  const clipped = query.trim().replace(/\s+/g, " ").slice(0, 140);
+  return `I don't have that in this warehouse catalog. Would you like me to request it be added to inventory? You can describe exactly what you want${clipped ? ` — I have “${clipped}” so far` : ""}.`;
+}
+
+export function inventoryRequestRecorded(detail: string): string {
+  const clipped = detail.trim().replace(/\s+/g, " ").slice(0, 160);
+  return clipped
+    ? `I sent that request to merch so they can review adding it to inventory. They'll see: ${clipped}.`
+    : "I sent that request to merch so they can review adding it to inventory.";
+}
+
+function inventoryRequestDetail(text: string): string {
+  return text.trim().replace(/^(y|yes|yeah|yep|yup|sure|ok|okay|please|do it|request it|add it)\b[,!.]?\s*/i, "").trim();
+}
+
+function priorUserSeek(messages: ChatMessage[]): string {
+  const users = messages.filter((message) => message.role === "user");
+  const latest = users.at(-1)?.content ?? "";
+  const detail = inventoryRequestDetail(latest);
+  if (detail.length >= 8) return detail;
+  if (users.length >= 2 && isInventoryAccept(latest)) return users.at(-2)?.content ?? latest;
+  return latest;
+}
+
+function looksBuyIntent(text: string): boolean {
+  return /\b(add|put)\b.+\b(cart|basket)\b|\badd (the|it|this|those|a|an)\b|\bi('ll| will) take\b/i.test(text);
+}
+
+function looksCartQuestion(text: string): boolean {
+  return /\b(show|what'?s|what is|view|see)\b.+\bcart\b|\bmy cart\b/i.test(text);
+}
+
+function assembleTurn(
+  input: AssistantTurnInput,
+  last: ChatMessage,
+  seeded: CatalogMatch[],
+  state: {
+    reply: string;
+    recommended: CatalogMatch[];
+    cartActions: CartAction[];
+    unmetDemand: UnmetDemandCapture | null;
+    showCart: boolean;
+  },
+): AssistantTurnResult {
+  const inferred = state.recommended.length ? state.recommended : inferFromText(state.reply, seeded);
   const unique = [...new Map(inferred.map((item) => [item.id, item])).values()].slice(0, 3);
+  let unmetDemand = unique.length ? null : state.unmetDemand;
+  let askToRequestInventory = false;
+  if (!unique.length && assistantOfferedInventoryRequest(input.messages)) {
+    if (isInventoryDecline(last.content)) {
+      unmetDemand = null;
+    } else if (isInventoryAccept(last.content) || last.content.trim().length >= 8) {
+      unmetDemand = {
+        rawText: priorUserSeek(input.messages),
+        category: unmetDemand?.category,
+        attributes: unmetDemand?.attributes,
+      };
+    } else {
+      unmetDemand = null;
+      askToRequestInventory = true;
+    }
+  } else if (!unique.length && (unmetDemand || looksLikeProductSeek(last.content) || looksUnmet(last.content))) {
+    unmetDemand = null;
+    askToRequestInventory = true;
+  } else if (!unique.length) {
+    unmetDemand = null;
+  }
+  let reply = state.reply;
   if (!reply) {
     if (unique[0]) {
       const first = unique[0];
       reply = `${first.name} is $${first.memberPrice.toFixed(2)} and ${first.inStock ? `in stock at ${input.warehouse.name}` : `unavailable at ${input.warehouse.name}`}. Would you like to see the product page?`;
+    } else if (unmetDemand) {
+      reply = inventoryRequestRecorded(unmetDemand.rawText);
+    } else if (askToRequestInventory) {
+      reply = inventoryRequestPrompt(last.content);
+    } else if (assistantOfferedInventoryRequest(input.messages) && isInventoryDecline(last.content)) {
+      reply = "No problem — we can keep looking in the warehouse catalog.";
     } else {
       reply = "I can recommend items from this warehouse catalog. Tell me what you need — a TV size, household staple, or furniture piece.";
     }
+  } else if (askToRequestInventory && !/inventor|request it/i.test(reply)) {
+    reply = `${reply} ${inventoryRequestPrompt(last.content)}`.trim();
+  } else if (unmetDemand && !/sent that request|inventor/i.test(reply)) {
+    reply = `${reply} ${inventoryRequestRecorded(unmetDemand.rawText)}`.trim();
   }
   return {
     reply,
     recommendations: unique.map(toRecommendation),
     askToView: unique.length > 0,
+    askToRequestInventory,
+    cartActions: state.cartActions,
+    unmetDemand,
+    cartSummary: state.showCart || state.cartActions.length
+      ? { itemCount: (input.cart ?? []).reduce((n, line) => n + line.quantity, 0), lines: input.cart ?? [] }
+      : null,
   };
+}
+
+function catalogFallbackTurn(
+  input: AssistantTurnInput,
+  last: ChatMessage,
+  seeded: CatalogMatch[],
+): AssistantTurnResult {
+  if (assistantOfferedInventoryRequest(input.messages) || looksUnmet(last.content) || (!seeded.length && looksLikeProductSeek(last.content))) {
+    return assembleTurn(input, last, seeded, {
+      reply: "",
+      recommended: [],
+      cartActions: [],
+      unmetDemand: looksUnmet(last.content) ? { rawText: last.content } : null,
+      showCart: false,
+    });
+  }
+  const inStock = seeded.filter((item) => item.inStock);
+  const picks = (inStock.length ? inStock : seeded).slice(0, 3);
+  return assembleTurn(input, last, seeded, {
+    reply: "",
+    recommended: picks,
+    cartActions: looksBuyIntent(last.content) && picks[0] ? [{ productId: picks[0].id, quantity: 1 }] : [],
+    unmetDemand: null,
+    showCart: looksCartQuestion(last.content),
+  });
 }

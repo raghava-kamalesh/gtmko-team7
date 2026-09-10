@@ -1,3 +1,4 @@
+import { inferDietaryTags, inferMemberOnly, inferPackSize } from "./catalog-meta.js";
 import { loadCostcoCatalog, warehouseQuantity } from "./catalog-seed.js";
 
 export type CatalogCard = {
@@ -8,6 +9,9 @@ export type CatalogCard = {
   memberPrice: number;
   description: string;
   stockByWarehouse: Record<string, number>;
+  dietaryTags: string[];
+  packSize: string | null;
+  memberOnly: boolean;
 };
 
 export type CatalogMatch = CatalogCard & { inStock: boolean; quantity: number };
@@ -52,6 +56,9 @@ function buildCatalog(): CatalogCard[] {
     memberPrice: Math.round(item.price * 0.92 * 100) / 100,
     description: item.description,
     stockByWarehouse: demoStock(item.id),
+    dietaryTags: inferDietaryTags(item.name, item.description, item.brand),
+    packSize: inferPackSize(item.name),
+    memberOnly: inferMemberOnly(item.brand),
   }));
   const catalog: CatalogCard[] = loadCostcoCatalog().map((item, index) => ({
     id: item.sku,
@@ -60,6 +67,9 @@ function buildCatalog(): CatalogCard[] {
     category: item.category,
     memberPrice: item.price,
     description: item.description,
+    dietaryTags: inferDietaryTags(item.name, item.description, item.brand),
+    packSize: inferPackSize(item.name, item.specs),
+    memberOnly: inferMemberOnly(item.brand, item.badge),
     stockByWarehouse: Object.fromEntries(
       WAREHOUSE_IDS.map((warehouseId, warehouseIndex) => [warehouseId, warehouseQuantity(index, warehouseIndex)]),
     ),
@@ -80,8 +90,24 @@ export function withWarehouse(card: CatalogCard, warehouseId: string): CatalogMa
   return { ...card, quantity, inStock: quantity > 0 };
 }
 
+const SEARCH_STOPWORDS = new Set([
+  "do", "you", "sell", "have", "the", "for", "and", "or", "to", "my", "me", "we",
+  "can", "is", "are", "was", "were", "be", "been", "actually", "looking", "something",
+  "else", "please", "would", "like", "want", "need", "got", "any", "there", "this",
+  "that", "what", "when", "where", "how", "with", "from", "your", "our", "they",
+  "them", "their", "just", "also", "really", "about", "into", "over", "under",
+  "than", "then", "too", "very", "not", "dont", "carry", "find", "source", "get",
+  "show", "tell", "give", "some", "more", "than", "does",
+]);
+const SHORT_PRODUCT_TOKENS = new Set(["tv", "pc", "led", "gb", "lb", "4k", "hd"]);
+
 function tokensOf(value: string): string[] {
-  return value.toLowerCase().split(/[^a-z0-9]+/).filter((token) => token.length >= 2);
+  return value.toLowerCase().split(/[^a-z0-9]+/).filter((token) => {
+    if (SEARCH_STOPWORDS.has(token)) return false;
+    if (SHORT_PRODUCT_TOKENS.has(token)) return true;
+    if (/^\d+$/.test(token)) return token.length >= 2;
+    return token.length >= 3;
+  });
 }
 
 export function searchStorefrontCatalog(
@@ -108,7 +134,7 @@ export function searchStorefrontCatalog(
       }
       return { item, score };
     })
-    .filter((row) => row.score > 0)
+    .filter((row) => row.score >= 8)
     .sort((a, b) => b.score - a.score || a.item.name.localeCompare(b.item.name));
   return scored.slice(0, limit).map((row) => withWarehouse(row.item, warehouseId));
 }
@@ -122,6 +148,9 @@ export function summarizeMatch(match: CatalogMatch): Record<string, unknown> {
     memberPrice: match.memberPrice,
     inStock: match.inStock,
     quantity: match.quantity,
+    dietaryTags: match.dietaryTags,
+    packSize: match.packSize,
+    memberOnly: match.memberOnly,
     description: match.description.slice(0, 180),
   };
 }

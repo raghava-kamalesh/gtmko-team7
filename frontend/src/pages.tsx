@@ -1,15 +1,58 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { Link, Navigate, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { getKirkHome, placeKirkPreorder } from "./api";
 import { categories, warehouses } from "./data";
 import { Empty, ProductCard, Quantity } from "./components";
 import { useAssistant } from "./assistant";
+import { useProductImages } from "./product-images";
+import { fallbackKirkHome } from "./kirk-home";
 import { useStore } from "./store";
-import type { Product, Shipping } from "./types";
+import type { KirkHome, Product, Shipping } from "./types";
 
 export function Home() {
-  const { products } = useStore();
+  const { products, user } = useStore();
   const { openAssistant } = useAssistant();
-  return <><section className="hero"><div><span>MEMBER-ONLY SAVINGS</span><h1>More value in every cart.</h1><p>Fresh finds, Kirkland Signature, and warehouse prices — shop with the Costco digital assistant.</p><div className="hero-ctas"><Link className="hero-btn" to="/search">Shop savings</Link><button type="button" className="secondary" onClick={() => openAssistant()}>Talk to Costco</button></div></div><div className="hero-visual" aria-hidden="true"><span /><span /><span /></div></section>
+  const [kirk, setKirk] = useState<KirkHome>(() => fallbackKirkHome(user?.email ?? "demo"));
+  const [preorderNote, setPreorderNote] = useState("");
+  useEffect(() => {
+    getKirkHome(user?.email ?? "demo").then(setKirk).catch(() => setKirk(fallbackKirkHome(user?.email ?? "demo")));
+  }, [user?.email]);
+  return <><section className="hero"><div><span>MEMBER-ONLY SAVINGS</span><h1>More value in every cart.</h1><p>Fresh finds, Kirkland Signature, and warehouse prices — shop with Kirk, your Costco assistant.</p><div className="hero-ctas"><Link className="hero-btn" to="/search">Shop savings</Link><button type="button" className="secondary" onClick={() => openAssistant()}>Talk to Kirk</button></div></div><div className="hero-visual" aria-hidden="true"><span /><span /><span /></div></section>
+    <section className="kirk-row" aria-label="Kirk assistant">
+      <div className="kirk-row-open">
+        <p>Hi, {kirk.member.displayName}</p>
+        <h2>Ask Kirk</h2>
+        <span>Chat, live voice, a pantry photo, or Imagine your cart.</span>
+        <button type="button" className="primary" onClick={() => openAssistant()}>Open Kirk</button>
+      </div>
+      <div className="kirk-suggestions">
+        {kirk.suggestions.map((tile) => (
+          <button type="button" className="kirk-tile" key={tile.id} aria-label={tile.label} onClick={() => openAssistant(tile.prompt)}>
+            <img src={tile.heroUrl} alt="" />
+            <b>{tile.label}</b>
+            <small>{tile.reason}</small>
+          </button>
+        ))}
+      </div>
+    </section>
+    {kirk.preorderItems.length > 0 && <section className="page-section kirk-preorder-strip">
+      <div className="section-head"><h2>Available to preorder</h2></div>
+      {preorderNote && <p className="notice" role="status">{preorderNote}</p>}
+      <div className="product-row">{kirk.preorderItems.map((item) => (
+        <article className="product-card" key={item.id}>
+          <b>{item.name}</b>
+          <p>{item.description || "Merch approved this buy. Preorder is open now."}</p>
+          <button className="primary" type="button" onClick={async () => {
+            try {
+              await placeKirkPreorder(item.id, user?.email ?? "demo");
+              setPreorderNote(`Preorder placed for ${item.name}.`);
+            } catch {
+              setPreorderNote("Could not place that preorder.");
+            }
+          }}>Preorder</button>
+        </article>
+      ))}</div>
+    </section>}
     <section className="service-row"><div><b>Same-Day Delivery</b><span>Fresh groceries to your door</span></div><div><b>2-Day Delivery</b><span>Pantry and household essentials</span></div><div><b>Executive Rewards</b><span>Earn 2% back on purchases</span></div><div><b>Risk-Free Shopping</b><span>Return to any warehouse</span></div></section>
     <section className="page-section"><div className="section-head"><h2>Shop popular categories</h2><Link to="/search">View all</Link></div><div className="category-grid">{categories.map(([slug, name], i) => <Link to={`/category/${slug}`} key={slug} className={`cat-tile cat-${i}`}><span /><b>{name}</b></Link>)}</div></section>
     <ProductCarousel title="Member favorites" items={products.filter(p => p.featured || p.badge).slice(0, 8)} />
@@ -37,6 +80,7 @@ export function ProductDetail() {
   const { id } = useParams();
   const { products, warehouse, add } = useStore();
   const { openAssistant } = useAssistant();
+  const { urlFor } = useProductImages();
   const product = products.find(p => p.id === id);
   if (!product) return <Empty title="Product not found" text="This item may no longer be available." action={<Link to="/">Go home</Link>} />;
   const stock = product.stockByWarehouse[warehouse.id] || 0;
@@ -47,7 +91,7 @@ export function ProductDetail() {
     <div className="product-detail">
       <div className="breadcrumbs"><Link to="/">Home</Link> / <Link to={`/category/${product.category}`}>{categoryName}</Link> / {product.name}</div>
       <div className="detail-grid">
-        <div className="detail-image"><img src={product.image} alt={product.name} /></div>
+        <div className="detail-image"><img src={urlFor(product.id, product.image)} alt={product.name} /></div>
         <div>
           {product.badge && <span className="badge">{product.badge}</span>}
           {product.brand && <p className="product-brand">{product.brand}</p>}
@@ -130,7 +174,14 @@ export function Checkout() {
   return <div className="checkout"><h1>Secure Checkout</h1><div className="steps"><b className={step===1?"active":""}>1 Shipping</b><b className={step===2?"active":""}>2 Payment</b><b>3 Confirmation</b></div>{step===1?<form className="checkout-form" onSubmit={submitShipping}><h2>Shipping information</h2>{Object.keys(shipping).map(key=><label key={key}>{key[0].toUpperCase()+key.slice(1)}<input required value={shipping[key as keyof Shipping]} onChange={e=>setShipping({...shipping,[key]:e.target.value})}/></label>)}<button className="primary">Continue to payment</button></form>:<form className="checkout-form" onSubmit={place}><h2>Payment</h2><div className="notice">🔒 Payment details are simulated and never stored.</div><label>Card number<input required inputMode="numeric" pattern="[0-9 ]{15,19}" placeholder="4242 4242 4242 4242"/></label><div className="form-row"><label>Expiration<input required placeholder="MM/YY"/></label><label>Security code<input required pattern="[0-9]{3,4}" placeholder="CVV"/></label></div><p className="total"><span>Order total</span><b>${cartTotal.toFixed(2)}</b></p><button className="primary">Place order</button><button type="button" className="secondary" onClick={()=>setStep(1)}>Back</button></form>}</div>;
 }
 
-export function Account() { const {user,logout}=useStore(); return <div className="account"><h1>Welcome, {user?.name}</h1><div className="account-grid"><Link to="/account/orders"><span>📦</span><b>Your Orders</b><small>Track, return, or buy things again</small></Link><div><span>♙</span><b>Account Details</b><small>{user?.email}</small></div><div><span>★</span><b>Membership</b><small>Gold Star Member</small></div><div><span>⌖</span><b>Addresses</b><small>Manage delivery addresses</small></div></div><button className="secondary" onClick={logout}>Sign out</button></div>; }
+export function Account() {
+  const { user, logout } = useStore();
+  const [kirk, setKirk] = useState<KirkHome>(() => fallbackKirkHome(user?.email ?? "demo"));
+  useEffect(() => {
+    getKirkHome(user?.email ?? "demo").then(setKirk).catch(() => undefined);
+  }, [user?.email]);
+  return <div className="account"><h1>Welcome, {user?.name}</h1><div className="account-grid"><Link to="/account/orders"><span>📦</span><b>Your Orders</b><small>Track, return, or buy things again</small></Link><div><span>♙</span><b>Account Details</b><small>{user?.email}</small></div><div><span>★</span><b>Membership</b><small>Gold Star Member</small></div><div><span>⌖</span><b>Kirk history</b><small>{kirk.member.unmetInterests.map((item) => item.text).join(" · ") || "No unmet interests yet"}</small></div></div><button className="secondary" onClick={logout}>Sign out</button></div>;
+}
 export function Orders() { const {orders}=useStore(); return <div className="orders"><h1>Your Orders</h1>{orders.length?orders.map(o=><Link className="order-card" key={o.id} to={`/account/orders/${o.id}`}><div><b>{o.id}</b><span>{new Date(o.createdAt).toLocaleDateString()}</span></div><div><span>{o.status}</span><b>${o.total.toFixed(2)}</b></div></Link>):<Empty title="No orders yet" text="Once you place an order, it will appear here." action={<Link to="/search">Shop products</Link>}/>}</div>; }
 export function OrderDetail({confirmation=false}:{confirmation?:boolean}) { const {id}=useParams(); const {orders,products}=useStore(); const o=orders.find(x=>x.id===id); if(!o)return <Empty title="Order not found" text="We couldn't locate this order."/>; return <div className="order-detail">{confirmation&&<div className="success">✓<h1>Thanks for your order!</h1><p>A confirmation has been saved to your account.</p></div>}<h2>Order {o.id}</h2><div className="notice"><b>{o.returnStatus||o.status}</b><span>Estimated delivery in 3–5 business days</span></div>{o.items.map(i=>{const p=products.find(x=>x.id===i.productId)!;return <div className="mini-line" key={i.productId}><img src={p.image} alt=""/><span>{p.name}<small>Qty {i.quantity}</small></span><b>${((p.memberPrice||0)*i.quantity).toFixed(2)}</b></div>})}<p className="total"><span>Total</span><b>${o.total.toFixed(2)}</b></p><h3>Shipping to</h3><p>{o.shipping.name}<br/>{o.shipping.address}<br/>{o.shipping.city}, {o.shipping.state} {o.shipping.zip}</p>{!o.returnStatus&&<Link className="secondary link-btn" to={`/account/orders/${o.id}/return`}>Return items</Link>}</div>; }
 export function ReturnOrder() { const {id}=useParams(); const {orders,returnOrder}=useStore(); const nav=useNavigate(); const o=orders.find(x=>x.id===id); if(!o)return <Empty title="Order not found" text="We couldn't locate this order."/>; const submit=(e:FormEvent)=>{e.preventDefault();returnOrder(o.id);nav(`/account/orders/${o.id}`)};return <div className="checkout"><h1>Start a return</h1><form className="checkout-form" onSubmit={submit}><h2>Why are you returning these items?</h2><label>Reason<select required defaultValue=""><option value="" disabled>Select a reason</option><option>Changed my mind</option><option>Damaged or defective</option><option>Wrong item received</option></select></label><label>Additional details<textarea rows={4}/></label><div className="notice">Items can also be returned at any Costco warehouse.</div><button className="primary">Submit return request</button></form></div>; }

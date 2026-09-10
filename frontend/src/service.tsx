@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { Link, Navigate, NavLink, Route, Routes, useNavigate, useParams } from "react-router-dom";
-import { api, ApiError } from "./api";
+import { api, ApiError, decideKirkPurchase, listKirkPurchases, regenerateKirkHeroes } from "./api";
 import { Logo } from "./components";
 
 type Staff = { id: string; email: string; name: string };
@@ -86,6 +86,7 @@ export function ServiceApp() {
     <Route path="orders/:id" element={<RequireStaff><ServiceShell><OrderDetail /></ServiceShell></RequireStaff>} />
     <Route path="returns" element={<RequireStaff><ServiceShell><Returns /></ServiceShell></RequireStaff>} />
     <Route path="discounts" element={<RequireStaff><ServiceShell><Discounts /></ServiceShell></RequireStaff>} />
+    <Route path="kirk" element={<RequireStaff><ServiceShell><KirkMerch /></ServiceShell></RequireStaff>} />
     <Route path="*" element={<div className="empty"><h1>Page not found</h1><Link to="/service">Back to customer service</Link></div>} />
   </Routes></ServiceRoot>;
 }
@@ -141,6 +142,7 @@ function ServiceShell({ children }: { children: ReactNode }) {
     ["/service/orders", "Orders"],
     ["/service/returns", "Returns"],
     ["/service/discounts", "Discounts"],
+    ["/service/kirk", "Kirk merch"],
   ] as const;
   return <div className="ops">
     <aside className="ops-side">
@@ -435,5 +437,62 @@ function Discounts() {
         </table>
       </div>
     </div>
+  </>;
+}
+
+function KirkMerch() {
+  const [rows, setRows] = useState<Array<{
+    id: string; query: string; status: string; category: string | null; memberKey: string;
+    trends: Array<{ title?: string }>; vendors: Array<{ name?: string }>;
+    preorderItems: Array<{ id: string; name: string }>;
+  }>>([]);
+  const [error, setError] = useState("");
+  const [note, setNote] = useState("");
+  const load = () => listKirkPurchases().then(setRows).catch((err) => setError(err.message));
+  useEffect(() => { load(); }, []);
+  const decide = async (id: string, action: "approve" | "reject") => {
+    try {
+      const result = await decideKirkPurchase(id, action);
+      setNote(action === "approve"
+        ? `Approved. Preorder is open${result.preorderItem ? ` for ${result.preorderItem.name}` : ""}. Email + in-app notify sent.`
+        : "Rejected. Preorder stays closed.");
+      load();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not decide this purchase");
+    }
+  };
+  return <>
+    <div className="ops-head">
+      <h1>Kirk merch queue</h1>
+      <p>Human approval is required before preorder opens. No delivery or on-hand wait.</p>
+    </div>
+    {error && <div className="alert" role="alert">{error}</div>}
+    {note && <div className="notice" role="status">{note}</div>}
+    <div className="ops-toolbar">
+      <button type="button" className="secondary" onClick={() => regenerateKirkHeroes().then(() => setNote("Imagine heroes regenerating.")).catch((err) => setError(err.message))}>Regenerate Imagine heroes</button>
+    </div>
+    <div className="ops-table-wrap">
+      <table className="ops-table">
+        <thead><tr><th>Request</th><th>Member</th><th>Trends / vendors</th><th>Status</th><th>Action</th></tr></thead>
+        <tbody>{rows.map((row) => (
+          <tr key={row.id}>
+            <td><b>{row.query}</b><small>{row.category || "uncategorized"}</small></td>
+            <td>{row.memberKey}</td>
+            <td>
+              {(row.trends || []).slice(0, 2).map((trend) => <small key={trend.title}>{trend.title}</small>)}
+              {(row.vendors || []).slice(0, 2).map((vendor) => <small key={vendor.name}>{vendor.name}</small>)}
+            </td>
+            <td><span className={statusClass(row.status)}>{title(row.status)}</span></td>
+            <td>
+              {row.status === "pending" ? <>
+                <button type="button" className="primary" onClick={() => decide(row.id, "approve")}>Approve purchase</button>
+                <button type="button" className="text-btn" onClick={() => decide(row.id, "reject")}>Reject</button>
+              </> : (row.preorderItems[0]?.name ?? "—")}
+            </td>
+          </tr>
+        ))}</tbody>
+      </table>
+    </div>
+    <p className="ops-note">Admin/debug: third-party Linear, Cursor agent, X search, and email stay mocked unless their API keys are set. Product behavior still completes the loop.</p>
   </>;
 }

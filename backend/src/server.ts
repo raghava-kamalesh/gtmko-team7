@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
 import { createApp } from "./app.js";
 import { createDatabase } from "./db.js";
+import { attachVoiceProxy } from "./voice.js";
 
 const envPath = resolve(dirname(fileURLToPath(import.meta.url)), "../.env");
 if (existsSync(envPath)) process.loadEnvFile(envPath);
@@ -15,6 +16,7 @@ const app = createApp(database);
 const server = serve({ fetch: app.fetch, port }, (info) => {
   console.log(`Costco commerce API listening on http://localhost:${info.port}`);
 });
+attachVoiceProxy(server as unknown as import("node:http").Server);
 
 async function shutdown() {
   server.close();

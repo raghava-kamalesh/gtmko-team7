@@ -41,6 +41,13 @@ export function catalogProducts(warehouses: Warehouse[]): Product[] {
     sku: item.sku,
     specs: item.specs,
     featured: Boolean(item.featured),
+    memberOnly: /kirkland/i.test(item.brand) || /member only/i.test(item.badge ?? ""),
+    packSize: item.specs.find((spec) => /quantity|pack|count|size/i.test(spec.name))?.value
+      ?? item.name.match(/(\d+\s*(?:ct|count|pk|pack|rolls?|lb|oz)\b[^,]*)/i)?.[1] ?? null,
+    dietaryTags: [
+      /\borganic\b/i.test(item.name) && "organic",
+      /\bgluten[- ]free\b/i.test(item.name) && "gluten-free",
+    ].filter(Boolean) as string[],
     stockByWarehouse: Object.fromEntries(
       warehouses.map((warehouse, warehouseIndex) => [warehouse.id, warehouseQuantity(index, warehouseIndex)]),
     ),

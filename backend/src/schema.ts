@@ -248,4 +248,106 @@ export const discountApplications = pgTable("discount_applications", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
+export const kirkCategoryHeroes = pgTable("kirk_category_heroes", {
+  id: text("id").primaryKey(),
+  category: text("category").notNull().unique(),
+  label: text("label").notNull(),
+  prompt: text("prompt").notNull(),
+  imageUrl: text("image_url"),
+  source: text("source").notNull().default("placeholder"),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const kirkProductImages = pgTable("kirk_product_images", {
+  id: text("id").primaryKey(),
+  productId: text("product_id").notNull().unique(),
+  imageUrl: text("image_url"),
+  source: text("source").notNull().default("placeholder"),
+  prompt: text("prompt").notNull().default(""),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const kirkFeedback = pgTable("kirk_feedback", {
+  id: text("id").primaryKey(),
+  memberKey: text("member_key").notNull(),
+  type: text("type").notNull(),
+  details: text("details").notNull(),
+  transcript: jsonb("transcript").notNull(),
+  linearIssueId: text("linear_issue_id"),
+  linearIdentifier: text("linear_identifier"),
+  linearUrl: text("linear_url"),
+  agentJobId: text("agent_job_id"),
+  agentUrl: text("agent_url"),
+  prUrl: text("pr_url"),
+  testResult: text("test_result"),
+  summary: text("summary"),
+  wiring: jsonb("wiring"),
+  status: text("status").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const kirkUnmetIntents = pgTable("kirk_unmet_intents", {
+  id: text("id").primaryKey(),
+  memberKey: text("member_key").notNull(),
+  rawText: text("raw_text").notNull(),
+  category: text("category"),
+  attributes: jsonb("attributes"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const kirkPurchaseRequests = pgTable("kirk_purchase_requests", {
+  id: text("id").primaryKey(),
+  intentId: text("intent_id").references(() => kirkUnmetIntents.id),
+  memberKey: text("member_key").notNull(),
+  query: text("query").notNull(),
+  category: text("category"),
+  trends: jsonb("trends").notNull(),
+  vendors: jsonb("vendors").notNull(),
+  status: text("status").notNull(),
+  decidedBy: text("decided_by"),
+  decidedAt: timestamp("decided_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const kirkPreorderItems = pgTable("kirk_preorder_items", {
+  id: text("id").primaryKey(),
+  purchaseRequestId: text("purchase_request_id").notNull().references(() => kirkPurchaseRequests.id),
+  name: text("name").notNull(),
+  category: text("category"),
+  vendor: text("vendor"),
+  description: text("description"),
+  imageUrl: text("image_url"),
+  estimatedPrice: numeric("estimated_price", { precision: 12, scale: 2 }),
+  available: boolean("available").notNull().default(true),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const kirkPreorders = pgTable("kirk_preorders", {
+  id: text("id").primaryKey(),
+  itemId: text("item_id").notNull().references(() => kirkPreorderItems.id),
+  memberKey: text("member_key").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const kirkNotifications = pgTable("kirk_notifications", {
+  id: text("id").primaryKey(),
+  memberKey: text("member_key").notNull(),
+  title: text("title").notNull(),
+  body: text("body").notNull(),
+  itemId: text("item_id"),
+  read: boolean("read").notNull().default(false),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const kirkOutboundMail = pgTable("kirk_outbound_mail", {
+  id: text("id").primaryKey(),
+  toAddresses: jsonb("to_addresses").notNull(),
+  subject: text("subject").notNull(),
+  body: text("body").notNull(),
+  provider: text("provider").notNull(),
+  status: text("status").notNull(),
+  error: text("error"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
 export type Member = typeof members.$inferSelect;

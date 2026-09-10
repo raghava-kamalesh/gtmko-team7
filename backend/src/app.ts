@@ -27,23 +27,15 @@ import {
   warehouses,
 } from "./schema.js";
 import { AssistantError, runAssistantTurn } from "./grok.js";
+import { ApiError, data as envelope } from "./http.js";
+import { captureUnmetDemand } from "./kirk.js";
+import { registerKirkRoutes } from "./kirk-routes.js";
 import { createSessionToken, hashPassword, hashToken, verifyPassword } from "./security.js";
 
 type Variables = { member: Member; tokenHash: string };
 type AppContext = Context<{ Variables: Variables }>;
 
-class ApiError extends Error {
-  constructor(
-    readonly status: 400 | 401 | 403 | 404 | 409 | 422 | 502 | 503,
-    readonly code: string,
-    message: string,
-    readonly details?: unknown,
-  ) {
-    super(message);
-  }
-}
-
-const data = <T>(value: T, meta?: Record<string, unknown>) => ({ data: value, ...(meta ? { meta } : {}) });
+const data = envelope;
 const money = (value: string | number) => Number(Number(value).toFixed(2));
 const asPositiveInt = (value: unknown, field: string, max = 99) => {
   const parsed = Number(value);
@@ -198,6 +190,7 @@ export function createApp(context: DatabaseContext) {
     if (!memberCart) {
       [memberCart] = await db.insert(carts).values({ id: randomUUID(), memberId, warehouseId: guestCart.warehouseId, status: "active" }).returning();
     }
+    if (!memberCart) return;
     const guestItems = await db.select().from(cartItems).where(eq(cartItems.cartId, guestCart.id));
     for (const item of guestItems) {
       const [existing] = await db.select().from(cartItems).where(and(eq(cartItems.cartId, memberCart.id), eq(cartItems.productId, item.productId))).limit(1);
@@ -278,22 +271,52 @@ export function createApp(context: DatabaseContext) {
       if (role !== "user" && role !== "assistant") {
         throw new ApiError(422, "VALIDATION_ERROR", `messages[${index}].role must be user or assistant`);
       }
-      if (!content || content.length > 4000) {
+      if ((!content && !row.image) || content.length > 4000) {
         throw new ApiError(422, "VALIDATION_ERROR", `messages[${index}].content must be 1–4000 characters`);
       }
-      return { role: role as "user" | "assistant", content };
+      return { role: role as "user" | "assistant", content: content || "What should I buy from this photo?", image: undefined as { mimeType: string; data: string } | undefined };
     });
     const warehouseInput = input.warehouse && typeof input.warehouse === "object" && !Array.isArray(input.warehouse)
       ? input.warehouse as Record<string, unknown>
       : {};
+    const cart = Array.isArray(input.cart)
+      ? input.cart.map((row) => {
+          const item = row as Record<string, unknown>;
+          return {
+            productId: String(item.productId ?? item.id ?? ""),
+            name: typeof item.name === "string" ? item.name : undefined,
+            brand: typeof item.brand === "string" ? item.brand : undefined,
+            quantity: Number(item.quantity ?? 1) || 1,
+          };
+        }).filter((row) => row.productId)
+      : [];
+    const image = input.image && typeof input.image === "object" && !Array.isArray(input.image)
+      ? input.image as Record<string, unknown>
+      : null;
+    if (image?.data && image?.mimeType) {
+      const last = messages.at(-1);
+      if (last) last.image = { mimeType: String(image.mimeType), data: String(image.data) };
+    }
+    const member = await memberFromOptionalAuth(c).catch(() => null);
     try {
-      return c.json(data(await runAssistantTurn({
+      const result = await runAssistantTurn({
         messages,
         warehouse: {
           id: String(warehouseInput.id ?? "w1"),
           name: String(warehouseInput.name ?? "Warehouse"),
         },
-      })));
+        cart,
+        memberKey: member?.email ?? (typeof input.memberKey === "string" ? input.memberKey : "demo"),
+      });
+      if (result.unmetDemand) {
+        await captureUnmetDemand(context.db, {
+          memberKey: member?.email ?? (typeof input.memberKey === "string" ? input.memberKey : "demo"),
+          rawText: result.unmetDemand.rawText,
+          category: result.unmetDemand.category,
+          attributes: result.unmetDemand.attributes,
+        }).catch(() => undefined);
+      }
+      return c.json(data(result));
     } catch (error) {
       if (error instanceof AssistantError) {
         throw new ApiError(error.status, error.code, error.message);
@@ -318,11 +341,11 @@ export function createApp(context: DatabaseContext) {
   app.get("/warehouses/:id", async (c) => {
     const [warehouse] = await db.select().from(warehouses).where(eq(warehouses.id, c.req.param("id"))).limit(1);
     if (!warehouse) throw new ApiError(404, "WAREHOUSE_NOT_FOUND", "Warehouse was not found");
-    const [{ stocked, units }] = await db
+    const [stock] = await db
       .select({ stocked: sql<number>`count(*) filter (where ${inventory.quantity} > 0)::int`, units: sql<number>`coalesce(sum(${inventory.quantity}), 0)::int` })
       .from(inventory)
       .where(eq(inventory.warehouseId, warehouse.id));
-    return c.json(data({ ...warehouse, inventorySummary: { stockedProducts: stocked, totalUnits: units } }));
+    return c.json(data({ ...warehouse, inventorySummary: { stockedProducts: stock?.stocked ?? 0, totalUnits: stock?.units ?? 0 } }));
   });
 
   app.get("/categories", async (c) => {
@@ -1043,6 +1066,10 @@ export function createApp(context: DatabaseContext) {
       expiresAt: input.expiresAt ? new Date(String(input.expiresAt)) : null,
     }).returning();
     return c.json(data({ ...created, value: money(created!.value) }), 201);
+  });
+
+  registerKirkRoutes(app as never, context, {
+    optionalMember: (c) => memberFromOptionalAuth(c as never),
   });
 
   app.patch("/admin/discounts/:id", async (c) => {
