@@ -90,8 +90,24 @@ export function withWarehouse(card: CatalogCard, warehouseId: string): CatalogMa
   return { ...card, quantity, inStock: quantity > 0 };
 }
 
+const SEARCH_STOPWORDS = new Set([
+  "do", "you", "sell", "have", "the", "for", "and", "or", "to", "my", "me", "we",
+  "can", "is", "are", "was", "were", "be", "been", "actually", "looking", "something",
+  "else", "please", "would", "like", "want", "need", "got", "any", "there", "this",
+  "that", "what", "when", "where", "how", "with", "from", "your", "our", "they",
+  "them", "their", "just", "also", "really", "about", "into", "over", "under",
+  "than", "then", "too", "very", "not", "dont", "carry", "find", "source", "get",
+  "show", "tell", "give", "some", "more", "than", "does",
+]);
+const SHORT_PRODUCT_TOKENS = new Set(["tv", "pc", "led", "gb", "lb", "4k", "hd"]);
+
 function tokensOf(value: string): string[] {
-  return value.toLowerCase().split(/[^a-z0-9]+/).filter((token) => token.length >= 2);
+  return value.toLowerCase().split(/[^a-z0-9]+/).filter((token) => {
+    if (SEARCH_STOPWORDS.has(token)) return false;
+    if (SHORT_PRODUCT_TOKENS.has(token)) return true;
+    if (/^\d+$/.test(token)) return token.length >= 2;
+    return token.length >= 3;
+  });
 }
 
 export function searchStorefrontCatalog(
@@ -118,7 +134,7 @@ export function searchStorefrontCatalog(
       }
       return { item, score };
     })
-    .filter((row) => row.score > 0)
+    .filter((row) => row.score >= 8)
     .sort((a, b) => b.score - a.score || a.item.name.localeCompare(b.item.name));
   return scored.slice(0, limit).map((row) => withWarehouse(row.item, warehouseId));
 }

@@ -22,6 +22,10 @@ describe("storefront catalog search", () => {
     expect(tvs.some((item) => item.id === "4" || item.id === "9565020")).toBe(true);
     expect(tvs[0]?.memberPrice).toBeGreaterThan(0);
   });
+
+  it("does not treat a missing specialty product as a weak catalog hit", () => {
+    expect(searchStorefrontCatalog("Do you sell Japanese whisky gift sets?")).toEqual([]);
+  });
 });
 
 describe("Grok assistant turn", () => {
@@ -77,6 +81,20 @@ describe("Grok assistant turn", () => {
     expect(result.cartActions[0]?.productId).toBeTruthy();
     expect(result.recommendations[0]?.name).toMatch(/bath tissue/i);
     expect(result.cartActions[0]?.productId).toBe(result.recommendations[0]?.id);
+  });
+
+  it("asks to request inventory when Grok is down and the catalog has no real match", async () => {
+    const fetchMock = vi.fn(async () => {
+      throw new TypeError("fetch failed");
+    });
+    const result = await runAssistantTurn({
+      messages: [{ role: "user", content: "Do you sell Japanese whisky gift sets?" }],
+      warehouse: { id: "w1", name: "Brooklyn" },
+    }, { fetch: fetchMock as unknown as typeof fetch, apiKey: "test-key" });
+    expect(result.recommendations).toEqual([]);
+    expect(result.unmetDemand).toBeNull();
+    expect(result.askToRequestInventory).toBe(true);
+    expect(result.reply).toMatch(/request it be added to inventory/i);
   });
 
   it("asks to request inventory when Grok is down and the member was looking for something else", async () => {
