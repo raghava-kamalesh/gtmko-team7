@@ -436,12 +436,16 @@ export function inventoryRequestRecorded(detail: string): string {
     : "I sent that request to merch so they can review adding it to inventory.";
 }
 
+function inventoryRequestDetail(text: string): string {
+  return text.trim().replace(/^(y|yes|yeah|yep|yup|sure|ok|okay|please|do it|request it|add it)\b[,!.]?\s*/i, "").trim();
+}
+
 function priorUserSeek(messages: ChatMessage[]): string {
   const users = messages.filter((message) => message.role === "user");
   const latest = users.at(-1)?.content ?? "";
-  if (users.length >= 2 && isInventoryAccept(latest) && latest.trim().length < 48) {
-    return users.at(-2)?.content ?? latest;
-  }
+  const detail = inventoryRequestDetail(latest);
+  if (detail.length >= 8) return detail;
+  if (users.length >= 2 && isInventoryAccept(latest)) return users.at(-2)?.content ?? latest;
   return latest;
 }
 

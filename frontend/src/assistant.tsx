@@ -264,7 +264,8 @@ function AssistantWidget({ open, pending, onConsumed, onClose, onOpen }: {
     if (requestLine && isAffirmative(text)) {
       const userLine = { id: newId(), role: "user" as const, text };
       commitLines([...linesRef.current, userLine]);
-      await submitInventoryRequest(userLine, requestSeek || text);
+      const detail = text.replace(/^(y|yes|yeah|yep|yup|sure|ok|okay|please|do it|request it|add it)\b[,!.]?\s*/i, "").trim();
+      await submitInventoryRequest(userLine, detail.length >= 8 ? detail : (requestSeek || text));
       return;
     }
     if (requestLine && isNegative(text)) {

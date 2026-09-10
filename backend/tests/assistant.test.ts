@@ -106,7 +106,7 @@ describe("Grok assistant turn", () => {
       warehouse: { id: "w1", name: "Brooklyn" },
     }, { fetch: fetchMock as unknown as typeof fetch, apiKey: "test-key" });
     expect(result.askToRequestInventory).toBe(false);
-    expect(result.unmetDemand?.rawText).toMatch(/Yamazaki|whisky/i);
+    expect(result.unmetDemand?.rawText).toMatch(/Yamazaki/i);
     expect(result.reply).toMatch(/sent that request to merch/i);
   });
 
