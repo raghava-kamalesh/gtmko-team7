@@ -16,6 +16,19 @@ export type CatalogCard = {
 
 export type CatalogMatch = CatalogCard & { inStock: boolean; quantity: number };
 
+export type PriceConstraint = {
+  minPrice?: number;
+  maxPrice?: number;
+};
+
+export type CatalogSearchOptions = {
+  category?: string;
+  limit?: number;
+  warehouseId?: string;
+  minPrice?: number;
+  maxPrice?: number;
+};
+
 const WAREHOUSE_IDS = ["w1", "w2", "w3", "w4"] as const;
 
 const demoProducts: Array<{
@@ -101,6 +114,82 @@ const SEARCH_STOPWORDS = new Set([
 ]);
 const SHORT_PRODUCT_TOKENS = new Set(["tv", "pc", "led", "gb", "lb", "4k", "hd"]);
 
+const PRICE_AMOUNT = String.raw`\$?\s*(\d+(?:\.\d{1,2})?)`;
+const BETWEEN_PRICE_RE = new RegExp(String.raw`between\s+${PRICE_AMOUNT}\s+and\s+${PRICE_AMOUNT}`, "i");
+const DOLLAR_RANGE_RE = /\$\s*(\d+(?:\.\d{1,2})?)\s*(?:-|to)\s*\$?\s*(\d+(?:\.\d{1,2})?)/i;
+const MAX_PRICE_RE = new RegExp(
+  String.raw`(?:only\s+)?(?:under|below|less than|cheaper than|up to|at most|no more than|max(?:imum)?(?:\s+price)?|budget(?:\s+of)?)\s+${PRICE_AMOUNT}(?:\s*(?:dollars?|usd))?`,
+  "i",
+);
+const OR_LESS_RE = new RegExp(String.raw`${PRICE_AMOUNT}\s*(?:or less|or under|or below|and under)`, "i");
+const MIN_PRICE_RE = new RegExp(
+  String.raw`(?:at least|min(?:imum)?(?:\s+price)?)\s+${PRICE_AMOUNT}(?:\s*(?:dollars?|usd))?`,
+  "i",
+);
+const MIN_PRICE_DOLLAR_RE = /(?:over|above|more than)\s+\$\s*(\d+(?:\.\d{1,2})?)(?:\s*(?:dollars?|usd))?/i;
+
+function asMoney(value: string | undefined): number | undefined {
+  if (value == null) return undefined;
+  const amount = Number(value);
+  return Number.isFinite(amount) ? amount : undefined;
+}
+
+export function parsePriceConstraint(text: string): PriceConstraint {
+  const normalized = text.replace(/,/g, "");
+  const between = normalized.match(BETWEEN_PRICE_RE) ?? normalized.match(DOLLAR_RANGE_RE);
+  if (between) {
+    const first = asMoney(between[1]);
+    const second = asMoney(between[2]);
+    if (first != null && second != null) {
+      return { minPrice: Math.min(first, second), maxPrice: Math.max(first, second) };
+    }
+  }
+  const result: PriceConstraint = {};
+  const max = normalized.match(MAX_PRICE_RE) ?? normalized.match(OR_LESS_RE);
+  const min = normalized.match(MIN_PRICE_RE) ?? normalized.match(MIN_PRICE_DOLLAR_RE);
+  const maxPrice = asMoney(max?.[1]);
+  const minPrice = asMoney(min?.[1]);
+  if (maxPrice != null) result.maxPrice = maxPrice;
+  if (minPrice != null) result.minPrice = minPrice;
+  return result;
+}
+
+export function mergePriceConstraints(...constraints: PriceConstraint[]): PriceConstraint {
+  const result: PriceConstraint = {};
+  for (const constraint of constraints) {
+    if (constraint.minPrice != null && Number.isFinite(constraint.minPrice)) result.minPrice = constraint.minPrice;
+    if (constraint.maxPrice != null && Number.isFinite(constraint.maxPrice)) result.maxPrice = constraint.maxPrice;
+  }
+  return result;
+}
+
+export function stripPricePhrases(text: string): string {
+  return text
+    .replace(/,/g, "")
+    .replace(BETWEEN_PRICE_RE, " ")
+    .replace(DOLLAR_RANGE_RE, " ")
+    .replace(MAX_PRICE_RE, " ")
+    .replace(OR_LESS_RE, " ")
+    .replace(MIN_PRICE_RE, " ")
+    .replace(MIN_PRICE_DOLLAR_RE, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+export function hasPriceConstraint(constraint: PriceConstraint): boolean {
+  return constraint.minPrice != null || constraint.maxPrice != null;
+}
+
+export function itemFitsPrice(price: number, constraint: PriceConstraint): boolean {
+  if (constraint.minPrice != null && price < constraint.minPrice) return false;
+  if (constraint.maxPrice != null && price > constraint.maxPrice) return false;
+  return true;
+}
+
+export function hasProductSearchTokens(text: string): boolean {
+  return tokensOf(stripPricePhrases(text)).length > 0;
+}
+
 function tokensOf(value: string): string[] {
   return value.toLowerCase().split(/[^a-z0-9]+/).filter((token) => {
     if (SEARCH_STOPWORDS.has(token)) return false;
@@ -112,19 +201,28 @@ function tokensOf(value: string): string[] {
 
 export function searchStorefrontCatalog(
   query: string,
-  options: { category?: string; limit?: number; warehouseId?: string } = {},
+  options: CatalogSearchOptions = {},
 ): CatalogMatch[] {
   const warehouseId = options.warehouseId ?? "w1";
   const limit = Math.min(8, Math.max(1, options.limit ?? 6));
-  const tokens = tokensOf(query);
+  const constraint = mergePriceConstraints(parsePriceConstraint(query), {
+    minPrice: options.minPrice,
+    maxPrice: options.maxPrice,
+  });
+  // Price words are filters, not product tokens. Leaving "400" in the query
+  // matches SKUs like 4000312521 and never checks memberPrice.
+  const searchQuery = stripPricePhrases(query);
+  const tokens = tokensOf(searchQuery);
   if (!tokens.length) return [];
+  const phrase = tokens.join(" ");
   const scored = getStorefrontCatalog()
     .filter((item) => !options.category || item.category === options.category)
+    .filter((item) => itemFitsPrice(item.memberPrice, constraint))
     .map((item) => {
       const hay = `${item.id} ${item.name} ${item.brand} ${item.category} ${item.description}`.toLowerCase();
       let score = 0;
-      if (item.id.toLowerCase() === query.trim().toLowerCase()) score += 80;
-      if (hay.includes(query.trim().toLowerCase())) score += 24;
+      if (item.id.toLowerCase() === query.trim().toLowerCase() || item.id.toLowerCase() === phrase) score += 80;
+      if (phrase.length >= 3 && hay.includes(phrase)) score += 24;
       for (const token of tokens) {
         if (item.id.toLowerCase() === token) score += 50;
         if (item.name.toLowerCase().includes(token)) score += 8;
@@ -136,7 +234,9 @@ export function searchStorefrontCatalog(
     })
     .filter((row) => row.score >= 8)
     .sort((a, b) => b.score - a.score || a.item.name.localeCompare(b.item.name));
-  return scored.slice(0, limit).map((row) => withWarehouse(row.item, warehouseId));
+  const topScore = scored[0]?.score ?? 0;
+  const cutoff = topScore >= 24 ? Math.max(8, topScore - 16) : 8;
+  return scored.filter((row) => row.score >= cutoff).slice(0, limit).map((row) => withWarehouse(row.item, warehouseId));
 }
 
 export function summarizeMatch(match: CatalogMatch): Record<string, unknown> {

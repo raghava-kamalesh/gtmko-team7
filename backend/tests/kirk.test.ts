@@ -190,6 +190,11 @@ describe("Kirk home and demand loop", () => {
     expect(search.productIds.length).toBeGreaterThan(0);
     const rec = executeVoiceTool("recommend_products", { product_ids: search.productIds }, "w1");
     expect(rec.productIds).toEqual(search.productIds.slice(0, 3));
+    const priced = executeVoiceTool("search_catalog", { query: "coffee table under 400" }, "w1");
+    const pricedRows = priced.output as Array<{ memberPrice: number; name: string }>;
+    expect(pricedRows.length).toBeGreaterThan(0);
+    expect(pricedRows.every((item) => item.memberPrice <= 400)).toBe(true);
+    expect(pricedRows.some((item) => /Mellina/i.test(item.name))).toBe(false);
   });
 });
 

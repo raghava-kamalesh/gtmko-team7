@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "../src/app.js";
 import { createDatabase, type DatabaseContext } from "../src/db.js";
-import { runAssistantTurn } from "../src/grok.js";
+import { catalogSearchText, priceConstraintFromMessages, runAssistantTurn } from "../src/grok.js";
 import { listPurchaseRequests } from "../src/kirk.js";
-import { searchStorefrontCatalog } from "../src/storefront-catalog.js";
+import { parsePriceConstraint, searchStorefrontCatalog } from "../src/storefront-catalog.js";
 
 const json = async (response: Response) => response.json() as Promise<any>;
 
@@ -25,6 +25,36 @@ describe("storefront catalog search", () => {
 
   it("does not treat a missing specialty product as a weak catalog hit", () => {
     expect(searchStorefrontCatalog("Do you sell Japanese whisky gift sets?")).toEqual([]);
+  });
+
+  it("parses max-price phrases used in Kirk chat", () => {
+    expect(parsePriceConstraint("only under 400 for coffee table")).toEqual({ maxPrice: 400 });
+    expect(parsePriceConstraint("Only under $400 for the coffee table.")).toEqual({ maxPrice: 400 });
+    expect(parsePriceConstraint("65 inch TV under $800")).toEqual({ maxPrice: 800 });
+    expect(parsePriceConstraint("between $200 and $400")).toEqual({ minPrice: 200, maxPrice: 400 });
+    expect(parsePriceConstraint("at least $100")).toEqual({ minPrice: 100 });
+    expect(parsePriceConstraint("over 65 inch TV")).toEqual({});
+  });
+
+  it("applies under-N filters so over-budget coffee tables are excluded", () => {
+    const unfiltered = searchStorefrontCatalog("coffee table");
+    expect(unfiltered.some((item) => item.memberPrice > 400)).toBe(true);
+    expect(unfiltered.some((item) => /Mellina/i.test(item.name))).toBe(true);
+
+    const filtered = searchStorefrontCatalog("only under 400 for coffee table");
+    expect(filtered.length).toBeGreaterThan(0);
+    expect(filtered.every((item) => item.memberPrice <= 400)).toBe(true);
+    expect(filtered.some((item) => /Point Cabrillo/i.test(item.name))).toBe(true);
+    expect(filtered.some((item) => /Whitlee/i.test(item.name))).toBe(true);
+    expect(filtered.some((item) => /Mellina/i.test(item.name))).toBe(false);
+    expect(filtered.some((item) => item.id === "4000213231")).toBe(false);
+    expect(filtered.some((item) => /SSD|Monitor|Recliner/i.test(item.name))).toBe(false);
+  });
+
+  it("honors an explicit maxPrice when the query has no price words", () => {
+    const filtered = searchStorefrontCatalog("coffee table", { maxPrice: 400 });
+    expect(filtered.every((item) => item.memberPrice <= 400)).toBe(true);
+    expect(filtered.some((item) => item.memberPrice > 400)).toBe(false);
   });
 });
 
@@ -174,6 +204,74 @@ describe("Grok assistant turn", () => {
     }, { fetch: fetchMock as unknown as typeof fetch, apiKey: "test-key" });
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(result.recommendations[0]?.id).toBe("1");
+  });
+
+  it("keeps a price-only follow-up attached to the previous product search", () => {
+    const messages = [
+      { role: "user" as const, content: "Show me a good coffee table" },
+      { role: "assistant" as const, content: "The Mellina set is $449.99." },
+      { role: "user" as const, content: "only under 400" },
+    ];
+    expect(priceConstraintFromMessages(messages)).toEqual({ maxPrice: 400 });
+    expect(catalogSearchText(messages, messages[2]!)).toMatch(/coffee table/i);
+    expect(catalogSearchText(messages, messages[2]!)).toMatch(/under 400/i);
+    expect(priceConstraintFromMessages([
+      { role: "user", content: "coffee table under 400" },
+      { role: "assistant", content: "Here are two tables." },
+      { role: "user", content: "I need a 65 inch TV" },
+    ])).toEqual({});
+  });
+
+  it("does not recommend over-budget items when Grok is down and the member set a max price", async () => {
+    const fetchMock = vi.fn(async () => {
+      throw new TypeError("fetch failed");
+    });
+    const result = await runAssistantTurn({
+      messages: [
+        { role: "user", content: "Show me a good coffee table" },
+        { role: "assistant", content: "The Point Cabrillo Round Storage Lift-Top Coffee Table is $349.99." },
+        { role: "user", content: "only under 400 for coffee table" },
+      ],
+      warehouse: { id: "w1", name: "Brooklyn" },
+    }, { fetch: fetchMock as unknown as typeof fetch, apiKey: "test-key" });
+    expect(result.recommendations.length).toBeGreaterThan(0);
+    expect(result.recommendations.every((item) => item.memberPrice <= 400)).toBe(true);
+    expect(result.recommendations.some((item) => /Mellina/i.test(item.name))).toBe(false);
+  });
+
+  it("applies a price-only follow-up to the earlier coffee table search when Grok is down", async () => {
+    const fetchMock = vi.fn(async () => {
+      throw new TypeError("fetch failed");
+    });
+    const result = await runAssistantTurn({
+      messages: [
+        { role: "user", content: "Show me a good coffee table" },
+        { role: "assistant", content: "The Mellina 3-piece Occasional Table Set is $449.99." },
+        { role: "user", content: "only under 400" },
+      ],
+      warehouse: { id: "w1", name: "Brooklyn" },
+    }, { fetch: fetchMock as unknown as typeof fetch, apiKey: "test-key" });
+    expect(result.recommendations.length).toBeGreaterThan(0);
+    expect(result.recommendations.every((item) => item.memberPrice <= 400)).toBe(true);
+    expect(result.recommendations.some((item) => /Mellina/i.test(item.name))).toBe(false);
+  });
+
+  it("drops recommend_products ids that break the member's max price", async () => {
+    const fetchMock = vi.fn(async () => grokReply({
+      content: "The Mellina set is a nice coffee table option.",
+      tool_calls: [{
+        id: "call-rec",
+        type: "function",
+        function: { name: "recommend_products", arguments: JSON.stringify({ product_ids: ["100350974"] }) },
+      }],
+    }));
+    const result = await runAssistantTurn({
+      messages: [{ role: "user", content: "coffee table under 400" }],
+      warehouse: { id: "w1", name: "Brooklyn" },
+    }, { fetch: fetchMock as unknown as typeof fetch, apiKey: "test-key" });
+    expect(result.recommendations.every((item) => item.memberPrice <= 400)).toBe(true);
+    expect(result.recommendations.some((item) => item.id === "100350974")).toBe(false);
+    expect(result.recommendations.length).toBeGreaterThan(0);
   });
 
   it("fails closed when the API key is missing", async () => {
