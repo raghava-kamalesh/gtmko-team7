@@ -18,6 +18,7 @@ export function kirkVoiceInstructions(warehouse: { id: string; name: string }, c
     "This is a live spoken conversation. Answer out loud, briefly, then keep listening.",
     `The member's warehouse is ${warehouse.name} (id ${warehouse.id}).`,
     "When they ask for a product, call search_catalog, then recommend_products with matching ids so the storefront can show cards.",
+    "Honor price filters such as under $400. Only recommend items inside the member's budget.",
     "Recommend only catalog items. Mention member price and stock when you know them.",
     "You can add items to the cart with add_to_cart, and capture unmet demand only after they agree to request a missing product.",
     cartSummary ? `Current cart: ${cartSummary}` : "The cart is empty.",
@@ -35,6 +36,8 @@ export function executeVoiceTool(
       category: typeof args.category === "string" ? args.category : undefined,
       limit: typeof args.limit === "number" ? args.limit : 6,
       warehouseId,
+      minPrice: typeof args.min_price === "number" ? args.min_price : undefined,
+      maxPrice: typeof args.max_price === "number" ? args.max_price : undefined,
     });
     return { output: matches.map(summarizeMatch), productIds: matches.slice(0, 3).map((item) => item.id) };
   }
@@ -65,7 +68,13 @@ export function kirkVoiceTools() {
       description: "Search the warehouse catalog",
       parameters: {
         type: "object",
-        properties: { query: { type: "string" }, category: { type: "string" }, limit: { type: "integer" } },
+        properties: {
+          query: { type: "string" },
+          category: { type: "string" },
+          limit: { type: "integer" },
+          min_price: { type: "number" },
+          max_price: { type: "number" },
+        },
         required: ["query"],
       },
     },

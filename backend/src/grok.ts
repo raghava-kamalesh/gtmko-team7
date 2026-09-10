@@ -5,10 +5,16 @@ import {
 } from "./catalog-meta.js";
 import {
   getCatalogById,
+  hasPriceConstraint,
+  hasProductSearchTokens,
+  itemFitsPrice,
+  mergePriceConstraints,
+  parsePriceConstraint,
   searchStorefrontCatalog,
   summarizeMatch,
   withWarehouse,
   type CatalogMatch,
+  type PriceConstraint,
 } from "./storefront-catalog.js";
 
 export class AssistantError extends Error {
@@ -92,12 +98,14 @@ const tools = [
       parameters: {
         type: "object",
         properties: {
-          query: { type: "string", description: "Product, brand, or use-case search text" },
+          query: { type: "string", description: "Product, brand, or use-case search text. Include budget phrases such as under $400 when the member set a price cap." },
           category: {
             type: "string",
             enum: ["grocery", "household", "electronics", "furniture", "clothing", "outdoor", "auto", "services"],
           },
           limit: { type: "integer", minimum: 1, maximum: 8 },
+          min_price: { type: "number", description: "Lowest member price to include" },
+          max_price: { type: "number", description: "Highest member price to include (use for under / max / up to)" },
         },
         required: ["query"],
       },
@@ -221,20 +229,55 @@ function inferFromText(text: string, candidates: CatalogMatch[]): CatalogMatch[]
     .slice(0, 3);
 }
 
+function numberArg(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim() && Number.isFinite(Number(value))) return Number(value);
+  return undefined;
+}
+
+export function priceConstraintFromMessages(messages: ChatMessage[]): PriceConstraint {
+  const lastUser = [...messages].reverse().find((message) => message.role === "user");
+  if (!lastUser) return {};
+  const latest = parsePriceConstraint(lastUser.content);
+  if (hasPriceConstraint(latest)) return latest;
+  if (hasProductSearchTokens(lastUser.content)) return {};
+  let constraint: PriceConstraint = {};
+  for (const message of messages) {
+    if (message.role !== "user") continue;
+    constraint = mergePriceConstraints(constraint, parsePriceConstraint(message.content));
+  }
+  return constraint;
+}
+
+export function catalogSearchText(messages: ChatMessage[], last: ChatMessage): string {
+  const lastText = last.image ? `${last.content} pantry recipe snack table product photo` : last.content;
+  if (hasProductSearchTokens(lastText)) return lastText;
+  const prior = messages.slice(0, -1).reverse().find((message) => (
+    message.role === "user" && hasProductSearchTokens(message.content)
+  ));
+  return prior ? `${prior.content} ${lastText}` : lastText;
+}
+
 function systemPrompt(
   warehouse: { id: string; name: string },
   matches: CatalogMatch[],
   cart: AssistantCartLine[] = [],
+  budget: PriceConstraint = {},
 ): string {
   const lines = matches.map((item) => (
     `- id=${item.id} | ${item.name} | ${item.brand} | $${item.memberPrice.toFixed(2)} | ${item.inStock ? `${item.quantity} in stock` : "out of stock"} at ${warehouse.name}`
   ));
   const cartLines = cart.map((item) => `- ${item.quantity}× ${item.name ?? item.productId}`);
+  const budgetLine = [
+    budget.minPrice != null ? `minimum $${budget.minPrice.toFixed(2)}` : "",
+    budget.maxPrice != null ? `maximum $${budget.maxPrice.toFixed(2)}` : "",
+  ].filter(Boolean).join(" and ");
   return [
     "You are Kirk, the Costco warehouse shopping assistant for this demo storefront.",
     "Recommend only products that appear in the catalog matches or search_catalog results. Never invent items, prices, or ids.",
     `The member's selected warehouse is ${warehouse.name} (id ${warehouse.id}). Use that stock when you mention availability.`,
     "Honor constraints: budget, party size, diet tags, Kirkland-first, pack size, and warehouse stock.",
+    budgetLine ? `The member's price filter for this turn is ${budgetLine}. Never recommend an item outside that range.` : "",
     "When you recommend one or more products, call recommend_products with those ids.",
     "When the member wants to buy a recommended item, call add_to_cart.",
     "If search_catalog finds nothing they asked for, say we do not carry it and ask if they want to request it be added to inventory. Do not call capture_unmet_demand until they agree or they describe the missing item.",
@@ -244,7 +287,7 @@ function systemPrompt(
     "If the user sent a photo, infer the scene (pantry, recipe, snack table, product) and recommend complements from the catalog.",
     cartLines.length ? `Current cart:\n${cartLines.join("\n")}` : "The cart is empty.",
     lines.length ? `Catalog matches for this turn:\n${lines.join("\n")}` : "No catalog matches were preselected. Use search_catalog.",
-  ].join("\n\n");
+  ].filter(Boolean).join("\n\n");
 }
 
 async function complete(
@@ -307,10 +350,11 @@ export async function runAssistantTurn(
     throw new AssistantError(400, "VALIDATION_ERROR", "The last message must come from the user");
   }
   const warehouseId = input.warehouse.id || "w1";
-  const searchText = last.image ? `${last.content} pantry recipe snack table product photo` : last.content;
-  const seeded = searchStorefrontCatalog(searchText, { warehouseId, limit: 6 });
+  const budget = priceConstraintFromMessages(input.messages);
+  const searchText = catalogSearchText(input.messages, last);
+  const seeded = searchStorefrontCatalog(searchText, { warehouseId, limit: 6, ...budget });
   const grokMessages: unknown[] = [
-    { role: "system", content: systemPrompt(input.warehouse, seeded, input.cart ?? []) },
+    { role: "system", content: systemPrompt(input.warehouse, seeded, input.cart ?? [], budget) },
     ...input.messages.map((message) => ({
       role: message.role,
       content: message.image
@@ -322,6 +366,7 @@ export async function runAssistantTurn(
     })),
   ];
   const recommended: CatalogMatch[] = [];
+  let droppedOverBudget = false;
   const cartActions: CartAction[] = [];
   let unmetDemand: UnmetDemandCapture | null = null;
   let showCart = false;
@@ -353,12 +398,27 @@ export async function runAssistantTurn(
           const query = String(args.query ?? last.content);
           const category = typeof args.category === "string" ? args.category : undefined;
           const limit = typeof args.limit === "number" ? args.limit : 6;
-          output = searchStorefrontCatalog(query, { category, limit, warehouseId }).map(summarizeMatch);
+          const constraint = mergePriceConstraints(
+            budget,
+            parsePriceConstraint(query),
+            { minPrice: numberArg(args.min_price), maxPrice: numberArg(args.max_price) },
+          );
+          output = searchStorefrontCatalog(query, { category, limit, warehouseId, ...constraint }).map(summarizeMatch);
         } else if (name === "recommend_products") {
           const ids = Array.isArray(args.product_ids) ? args.product_ids.map((id) => String(id)) : [];
           const resolved = resolveIds(ids, warehouseId);
-          recommended.push(...resolved);
-          output = { ok: true, products: resolved.map(summarizeMatch) };
+          const fitting = resolved.filter((item) => itemFitsPrice(item.memberPrice, budget));
+          if (resolved.length && !fitting.length) droppedOverBudget = true;
+          recommended.push(...fitting);
+          output = {
+            ok: true,
+            products: fitting.map(summarizeMatch),
+            rejected: resolved.filter((item) => !itemFitsPrice(item.memberPrice, budget)).map((item) => ({
+              id: item.id,
+              reason: "outside_price_filter",
+              memberPrice: item.memberPrice,
+            })),
+          };
         } else if (name === "add_to_cart") {
           const productId = String(args.product_id ?? "");
           const quantity = typeof args.quantity === "number" ? Math.max(1, Math.min(12, args.quantity)) : 1;
@@ -391,6 +451,10 @@ export async function runAssistantTurn(
       return catalogFallbackTurn(input, last, seeded);
     }
     throw error;
+  }
+
+  if (!recommended.length && droppedOverBudget && seeded.length && hasPriceConstraint(budget)) {
+    recommended.push(...seeded.slice(0, 3));
   }
 
   return assembleTurn(input, last, seeded, { reply, recommended, cartActions, unmetDemand, showCart });
