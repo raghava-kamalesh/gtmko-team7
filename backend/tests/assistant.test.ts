@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "../src/app.js";
 import { createDatabase, type DatabaseContext } from "../src/db.js";
 import { runAssistantTurn } from "../src/grok.js";
+import { listPurchaseRequests } from "../src/kirk.js";
 import { searchStorefrontCatalog } from "../src/storefront-catalog.js";
 
 const json = async (response: Response) => response.json() as Promise<any>;
@@ -78,7 +79,7 @@ describe("Grok assistant turn", () => {
     expect(result.cartActions[0]?.productId).toBe(result.recommendations[0]?.id);
   });
 
-  it("captures unmet demand when Grok is down and the member was looking for something else", async () => {
+  it("asks to request inventory when Grok is down and the member was looking for something else", async () => {
     const fetchMock = vi.fn(async () => {
       throw new TypeError("fetch failed");
     });
@@ -87,8 +88,43 @@ describe("Grok assistant turn", () => {
       warehouse: { id: "w1", name: "Brooklyn" },
     }, { fetch: fetchMock as unknown as typeof fetch, apiKey: "test-key" });
     expect(result.recommendations).toEqual([]);
-    expect(result.unmetDemand?.rawText).toMatch(/whisky/i);
-    expect(result.reply).toMatch(/unmet demand/i);
+    expect(result.unmetDemand).toBeNull();
+    expect(result.askToRequestInventory).toBe(true);
+    expect(result.reply).toMatch(/request it be added to inventory/i);
+  });
+
+  it("records the inventory request after the member agrees", async () => {
+    const fetchMock = vi.fn(async () => {
+      throw new TypeError("fetch failed");
+    });
+    const result = await runAssistantTurn({
+      messages: [
+        { role: "user", content: "I was actually looking for a Japanese whisky gift set" },
+        { role: "assistant", content: "I don't have that in this warehouse catalog. Would you like me to request it be added to inventory? You can describe exactly what you want." },
+        { role: "user", content: "Yes, a 12-year Yamazaki gift box" },
+      ],
+      warehouse: { id: "w1", name: "Brooklyn" },
+    }, { fetch: fetchMock as unknown as typeof fetch, apiKey: "test-key" });
+    expect(result.askToRequestInventory).toBe(false);
+    expect(result.unmetDemand?.rawText).toMatch(/Yamazaki|whisky/i);
+    expect(result.reply).toMatch(/sent that request to merch/i);
+  });
+
+  it("does not log unmet demand when the member declines the inventory request", async () => {
+    const fetchMock = vi.fn(async () => {
+      throw new TypeError("fetch failed");
+    });
+    const result = await runAssistantTurn({
+      messages: [
+        { role: "user", content: "Do you sell Japanese whisky gift sets?" },
+        { role: "assistant", content: "I don't have that in this warehouse catalog. Would you like me to request it be added to inventory?" },
+        { role: "user", content: "No thanks" },
+      ],
+      warehouse: { id: "w1", name: "Brooklyn" },
+    }, { fetch: fetchMock as unknown as typeof fetch, apiKey: "test-key" });
+    expect(result.askToRequestInventory).toBe(false);
+    expect(result.unmetDemand).toBeNull();
+    expect(result.reply).toMatch(/keep looking/i);
   });
 
   it("runs a search tool round before answering", async () => {
@@ -172,5 +208,54 @@ describe("POST /assistant/chat", () => {
     const payload = await json(response);
     expect(payload.data.recommendations[0].id).toBe("4");
     expect(payload.data.askToView).toBe(true);
+  });
+
+  it("asks before writing a missing product to the merch queue", async () => {
+    context = await createDatabase("memory://inventory-request");
+    app = createApp(context);
+    vi.stubGlobal("fetch", async () => grokReply({
+      content: "I do not have that in the warehouse catalog.",
+    }));
+    const previous = process.env.XAI_API_KEY;
+    process.env.XAI_API_KEY = "test-key";
+    const first = await app.request("/assistant/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        messages: [{ role: "user", content: "I was actually looking for a Japanese whisky gift set" }],
+        warehouse: { id: "w1", name: "Brooklyn" },
+        memberKey: "alex.johnson@example.com",
+      }),
+    });
+    expect(first.status).toBe(200);
+    const asked = await json(first);
+    expect(asked.data.askToRequestInventory).toBe(true);
+    expect(asked.data.unmetDemand).toBeNull();
+    expect(asked.data.reply).toMatch(/request it be added to inventory/i);
+    expect(await listPurchaseRequests(context.db)).toEqual([]);
+
+    const confirm = await app.request("/assistant/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        messages: [
+          { role: "user", content: "I was actually looking for a Japanese whisky gift set" },
+          { role: "assistant", content: asked.data.reply },
+          { role: "user", content: "Yes, a 12-year Yamazaki gift box" },
+        ],
+        warehouse: { id: "w1", name: "Brooklyn" },
+        memberKey: "alex.johnson@example.com",
+      }),
+    });
+    process.env.XAI_API_KEY = previous;
+    expect(confirm.status).toBe(200);
+    const recorded = await json(confirm);
+    expect(recorded.data.askToRequestInventory).toBe(false);
+    expect(recorded.data.unmetDemand?.rawText).toMatch(/Yamazaki|whisky/i);
+    const queued = await listPurchaseRequests(context.db);
+    expect(queued).toHaveLength(1);
+    expect(queued[0]?.status).toBe("pending");
+    expect(queued[0]?.memberKey).toBe("alex.johnson@example.com");
+    expect(`${queued[0]?.query} ${recorded.data.unmetDemand?.rawText}`).toMatch(/Yamazaki|whisky/i);
   });
 });

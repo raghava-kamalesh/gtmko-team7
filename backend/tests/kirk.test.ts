@@ -178,7 +178,7 @@ describe("Kirk Imagine and Grok tools", () => {
     expect(result.recommendations[0]?.id).toBe("1");
   });
 
-  it("flags unmet demand from ordinary shopping language", async () => {
+  it("asks before logging a missing product as unmet demand", async () => {
     const fetchMock = vi.fn(async () => grokReply({
       content: "I do not have that in the warehouse catalog.",
     }));
@@ -186,7 +186,9 @@ describe("Kirk Imagine and Grok tools", () => {
       messages: [{ role: "user", content: "I was actually looking for a Japanese whisky gift set" }],
       warehouse: { id: "w1", name: "Brooklyn" },
     }, { fetch: fetchMock as unknown as typeof fetch, apiKey: "test-key" });
-    expect(result.unmetDemand?.rawText).toMatch(/whisky/i);
+    expect(result.unmetDemand).toBeNull();
+    expect(result.askToRequestInventory).toBe(true);
+    expect(result.reply).toMatch(/inventory/i);
   });
 
   it("reports mocked wiring when third-party keys are absent", () => {

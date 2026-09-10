@@ -33,6 +33,7 @@ export type AssistantChatResponse = {
   reply: string;
   recommendations: AssistantRecommendation[];
   askToView: boolean;
+  askToRequestInventory?: boolean;
   cartActions?: Array<{ productId: string; quantity: number }>;
   unmetDemand?: { rawText: string; category?: string } | null;
   cartSummary?: { itemCount: number } | null;

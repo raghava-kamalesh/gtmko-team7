@@ -203,6 +203,45 @@ describe("Costco commerce journeys", () => {
     expect(screen.getAllByText(/Bath Tissue/).length).toBeGreaterThan(0);
   });
 
+  it("asks to request a missing product and writes the description to merch", async () => {
+    const demandBodies: unknown[] = [];
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/assistant/chat")) {
+        return new Response(JSON.stringify({
+          data: {
+            reply: "I don't have that in this warehouse catalog. Would you like me to request it be added to inventory? You can describe exactly what you want.",
+            recommendations: [],
+            askToView: false,
+            askToRequestInventory: true,
+            unmetDemand: null,
+          },
+        }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      if (url.includes("/kirk/demand")) {
+        demandBodies.push(JSON.parse(String(init?.body ?? "{}")));
+        return new Response(JSON.stringify({ data: { request: { id: "pr-1", status: "pending" } } }), { status: 201, headers: { "Content-Type": "application/json" } });
+      }
+      if (url.includes("/kirk/home")) {
+        return new Response(JSON.stringify({ data: { member: { displayName: "Alex Johnson", unmetInterests: [], history: [] }, suggestions: [], preorderItems: [], notifications: [] } }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ error: { message: url } }), { status: 404 });
+    });
+    const user = userEvent.setup();
+    open();
+    await user.click(screen.getByRole("button", { name: "Kirk assistant" }));
+    const panel = screen.getByRole("dialog", { name: "Kirk" });
+    await user.type(within(panel).getByPlaceholderText(/Ask about items/), "Do you sell Japanese whisky gift sets?");
+    await user.click(within(panel).getByRole("button", { name: "Send" }));
+    expect(await within(panel).findByText(/request it be added to inventory/)).toBeInTheDocument();
+    expect(within(panel).getByText(/Say yes to request it for inventory/)).toBeInTheDocument();
+    await user.click(within(panel).getByRole("button", { name: "Yes, request it" }));
+    expect(await within(panel).findByText(/sent that request to merch/)).toBeInTheDocument();
+    expect(demandBodies[0]).toMatchObject({
+      rawText: "Do you sell Japanese whisky gift sets?",
+    });
+  });
+
   it("auto-sends a history category prompt from the home row", async () => {
     const bodies: unknown[] = [];
     vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {

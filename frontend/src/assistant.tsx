@@ -21,6 +21,7 @@ export type ChatLine = {
   text: string;
   productIds?: string[];
   awaitingView?: boolean;
+  awaitingInventoryRequest?: boolean;
   imageUrl?: string;
   imagineUrl?: string;
 };
@@ -133,13 +134,23 @@ function AssistantWidget({ open, pending, onConsumed, onClose, onOpen }: {
 
   const offerLine = [...lines].reverse().find((line) => line.awaitingView && line.productIds?.[0]);
   const offered = offerLine?.productIds?.[0] ? productById(offerLine.productIds[0]) : undefined;
+  const requestLine = [...lines].reverse().find((line) => line.awaitingInventoryRequest);
+  const requestSeek = (() => {
+    if (!requestLine) return "";
+    const index = lines.findIndex((line) => line.id === requestLine.id);
+    return [...lines.slice(0, index)].reverse().find((line) => line.role === "user")?.text ?? "";
+  })();
 
   const commitLines = (next: ChatLine[]) => {
     linesRef.current = next;
     setLines(next);
   };
 
-  const clearAwaiting = (curr: ChatLine[]) => curr.map((line) => line.awaitingView ? { ...line, awaitingView: false } : line);
+  const clearAwaiting = (curr: ChatLine[]) => curr.map((line) => (
+    line.awaitingView || line.awaitingInventoryRequest
+      ? { ...line, awaitingView: false, awaitingInventoryRequest: false }
+      : line
+  ));
 
   const openProduct = (product: Product, afterId?: string) => {
     const base = clearAwaiting(linesRef.current);
@@ -196,15 +207,16 @@ function AssistantWidget({ open, pending, onConsumed, onClose, onOpen }: {
       if (primary && (result.askToView || matched.length) && !replyAsksToView(reply)) {
         reply = `${reply} ${viewQuestion(primary)}`.trim();
       }
-      if (result.unmetDemand && !/unmet demand/i.test(reply)) {
-        reply = `${reply} I logged that as unmet demand for merch to source.`.trim();
+      if (result.unmetDemand && !/sent that request|inventor/i.test(reply)) {
+        reply = `${reply} I sent that request to merch so they can review adding it to inventory.`.trim();
       }
       commitLines(insertAfterLine(linesRef.current, userLine.id, {
         id: newId(),
         role: "assistant",
         text: reply,
         productIds: matched.map((item) => item.id),
-        awaitingView: Boolean(primary),
+        awaitingView: Boolean(primary) && !result.askToRequestInventory,
+        awaitingInventoryRequest: Boolean(result.askToRequestInventory) && !primary,
         imagineUrl: result.imagineUrl,
       }));
     } catch {
@@ -215,6 +227,24 @@ function AssistantWidget({ open, pending, onConsumed, onClose, onOpen }: {
       }));
     } finally {
       setBusy(false);
+    }
+  };
+
+  const submitInventoryRequest = async (userLine: ChatLine, detail: string) => {
+    const description = detail.trim();
+    try {
+      await captureKirkDemand({ rawText: description, memberKey });
+      commitLines(insertAfterLine(clearAwaiting(linesRef.current), userLine.id, {
+        id: newId(),
+        role: "assistant",
+        text: `I sent that request to merch so they can review adding it to inventory. They'll see: ${description}`,
+      }));
+    } catch {
+      commitLines(insertAfterLine(linesRef.current, userLine.id, {
+        id: newId(),
+        role: "assistant",
+        text: "I couldn't save that inventory request. Try again in a moment.",
+      }));
     }
   };
 
@@ -229,6 +259,28 @@ function AssistantWidget({ open, pending, onConsumed, onClose, onOpen }: {
       const userLine = { id: newId(), role: "user" as const, text };
       commitLines([...linesRef.current, userLine]);
       declineProduct(offered, userLine.id);
+      return;
+    }
+    if (requestLine && isAffirmative(text)) {
+      const userLine = { id: newId(), role: "user" as const, text };
+      commitLines([...linesRef.current, userLine]);
+      await submitInventoryRequest(userLine, requestSeek || text);
+      return;
+    }
+    if (requestLine && isNegative(text)) {
+      const userLine = { id: newId(), role: "user" as const, text };
+      commitLines([...linesRef.current, userLine]);
+      commitLines(insertAfterLine(clearAwaiting(linesRef.current), userLine.id, {
+        id: newId(),
+        role: "assistant",
+        text: "No problem — we can keep looking in the warehouse catalog.",
+      }));
+      return;
+    }
+    if (requestLine) {
+      const userLine = { id: newId(), role: "user" as const, text };
+      commitLines([...linesRef.current, userLine]);
+      await submitInventoryRequest(userLine, text);
       return;
     }
     await sendTurn(text);
@@ -403,6 +455,7 @@ function AssistantWidget({ open, pending, onConsumed, onClose, onOpen }: {
         {lines.map((line) => {
           const recs = (line.productIds ?? []).map(productById).filter((item): item is Product => Boolean(item));
           const isOffer = line.awaitingView && offerLine?.id === line.id && offered;
+          const isRequest = line.awaitingInventoryRequest && requestLine?.id === line.id;
           return (
             <article className={`assistant-msg is-${line.role}`} key={line.id}>
               <p className="assistant-msg-text">{line.text}</p>
@@ -436,6 +489,22 @@ function AssistantWidget({ open, pending, onConsumed, onClose, onOpen }: {
                   declineProduct(offered, userLine.id);
                 }}>Not now</button>
               </div>}
+              {isRequest && <div className="assistant-actions">
+                <button type="button" className="primary" onClick={() => {
+                  const userLine = { id: newId(), role: "user" as const, text: "Yes, request it" };
+                  commitLines([...linesRef.current, userLine]);
+                  void submitInventoryRequest(userLine, requestSeek || "Requested a missing catalog item");
+                }}>Yes, request it</button>
+                <button type="button" className="secondary" onClick={() => {
+                  const userLine = { id: newId(), role: "user" as const, text: "No thanks" };
+                  commitLines([...linesRef.current, userLine]);
+                  commitLines(insertAfterLine(clearAwaiting(linesRef.current), userLine.id, {
+                    id: newId(),
+                    role: "assistant",
+                    text: "No problem — we can keep looking in the warehouse catalog.",
+                  }));
+                }}>No thanks</button>
+              </div>}
             </article>
           );
         })}
@@ -446,7 +515,7 @@ function AssistantWidget({ open, pending, onConsumed, onClose, onOpen }: {
         <label className="assistant-field">Ask Kirk<input value={input} onChange={(e) => setInput(e.target.value)} placeholder="Ask about items, stock, or your cart" disabled={busy} /></label>
         <input ref={fileRef} type="file" accept="image/*" hidden onChange={(e) => { const file = e.target.files?.[0]; if (file) void onPickImage(file); e.target.value = ""; }} />
         <button className="primary" type="submit" disabled={busy}>Send</button>
-        <small>{offered ? "Say yes to open the product page, or ask for something else" : `Cart ${cartCount} · $${cartTotal.toFixed(2)} · Feedback goes to GrokBot`}</small>
+        <small>{requestLine ? "Say yes to request it for inventory, or describe exactly what you want" : offered ? "Say yes to open the product page, or ask for something else" : `Cart ${cartCount} · $${cartTotal.toFixed(2)} · Feedback goes to GrokBot`}</small>
       </form>
     </section>}
   </>;

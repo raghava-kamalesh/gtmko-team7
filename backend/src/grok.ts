@@ -56,6 +56,7 @@ export type AssistantTurnResult = {
   reply: string;
   recommendations: RecommendedProduct[];
   askToView: boolean;
+  askToRequestInventory: boolean;
   cartActions: CartAction[];
   unmetDemand: UnmetDemandCapture | null;
   cartSummary: { itemCount: number; lines: AssistantCartLine[] } | null;
@@ -139,7 +140,7 @@ const tools = [
     type: "function",
     function: {
       name: "capture_unmet_demand",
-      description: "Call when the member wanted something the catalog cannot fulfill (nothing fits, looking for X).",
+      description: "Call only after the member agrees to request a missing product, or when they describe the item they want added to inventory.",
       parameters: {
         type: "object",
         properties: {
@@ -236,7 +237,7 @@ function systemPrompt(
     "Honor constraints: budget, party size, diet tags, Kirkland-first, pack size, and warehouse stock.",
     "When you recommend one or more products, call recommend_products with those ids.",
     "When the member wants to buy a recommended item, call add_to_cart.",
-    "If nothing fits or they were looking for something else, call capture_unmet_demand. Out-of-stock weak matches can also lead there.",
+    "If search_catalog finds nothing they asked for, say we do not carry it and ask if they want to request it be added to inventory. Do not call capture_unmet_demand until they agree or they describe the missing item.",
     "When they ask about the cart, call show_cart_summary.",
     "After you recommend a product, ask if they would like to see the product page or add it to the cart. Do not say you opened it yourself.",
     "Keep replies concise and conversational. Mention member price and warehouse stock when you have them.",
@@ -399,6 +400,51 @@ function looksUnmet(text: string): boolean {
   return /i was actually looking|nothing (fits|matches)|you don'?t have|not what i (wanted|meant)|wanted something else/i.test(text);
 }
 
+export function looksLikeProductSeek(text: string): boolean {
+  const trimmed = text.trim();
+  if (/^(hi|hello|hey|thanks|thank you|ok|okay)\b/i.test(trimmed)) return false;
+  if (looksUnmet(trimmed)) return true;
+  return /do you (have|sell|carry)|looking for|i (need|want|wish)|can you (find|source|get)|gift set|i('d| would) like|is there (a|any)|got any|carry any/i.test(trimmed);
+}
+
+export function assistantOfferedInventoryRequest(messages: ChatMessage[]): boolean {
+  return messages.some((message, index) => (
+    message.role === "assistant"
+    && index < messages.length - 1
+    && /request (it |this |a product )?(be )?added|added to inventory|request .*inventor|describe (exactly )?what you want/i.test(message.content)
+  ));
+}
+
+export function isInventoryDecline(text: string): boolean {
+  return /^(n|no|nope|nah|not now|no thanks|no thank you)\b/i.test(text.trim());
+}
+
+export function isInventoryAccept(text: string): boolean {
+  return /^(y|yes|yeah|yep|yup|sure|ok|okay|please|do it|request it|add it)\b/i.test(text.trim())
+    || /request it|add (it|this) to inventory|please add/i.test(text);
+}
+
+export function inventoryRequestPrompt(query: string): string {
+  const clipped = query.trim().replace(/\s+/g, " ").slice(0, 140);
+  return `I don't have that in this warehouse catalog. Would you like me to request it be added to inventory? You can describe exactly what you want${clipped ? ` — I have “${clipped}” so far` : ""}.`;
+}
+
+export function inventoryRequestRecorded(detail: string): string {
+  const clipped = detail.trim().replace(/\s+/g, " ").slice(0, 160);
+  return clipped
+    ? `I sent that request to merch so they can review adding it to inventory. They'll see: ${clipped}.`
+    : "I sent that request to merch so they can review adding it to inventory.";
+}
+
+function priorUserSeek(messages: ChatMessage[]): string {
+  const users = messages.filter((message) => message.role === "user");
+  const latest = users.at(-1)?.content ?? "";
+  if (users.length >= 2 && isInventoryAccept(latest) && latest.trim().length < 48) {
+    return users.at(-2)?.content ?? latest;
+  }
+  return latest;
+}
+
 function looksBuyIntent(text: string): boolean {
   return /\b(add|put)\b.+\b(cart|basket)\b|\badd (the|it|this|those|a|an)\b|\bi('ll| will) take\b/i.test(text);
 }
@@ -421,9 +467,26 @@ function assembleTurn(
 ): AssistantTurnResult {
   const inferred = state.recommended.length ? state.recommended : inferFromText(state.reply, seeded);
   const unique = [...new Map(inferred.map((item) => [item.id, item])).values()].slice(0, 3);
-  let unmetDemand = state.unmetDemand;
-  if (!unmetDemand && looksUnmet(last.content) && !unique.length) {
-    unmetDemand = { rawText: last.content };
+  let unmetDemand = unique.length ? null : state.unmetDemand;
+  let askToRequestInventory = false;
+  if (!unique.length && assistantOfferedInventoryRequest(input.messages)) {
+    if (isInventoryDecline(last.content)) {
+      unmetDemand = null;
+    } else if (isInventoryAccept(last.content) || last.content.trim().length >= 8) {
+      unmetDemand = {
+        rawText: priorUserSeek(input.messages),
+        category: unmetDemand?.category,
+        attributes: unmetDemand?.attributes,
+      };
+    } else {
+      unmetDemand = null;
+      askToRequestInventory = true;
+    }
+  } else if (!unique.length && (unmetDemand || looksLikeProductSeek(last.content) || looksUnmet(last.content))) {
+    unmetDemand = null;
+    askToRequestInventory = true;
+  } else if (!unique.length) {
+    unmetDemand = null;
   }
   let reply = state.reply;
   if (!reply) {
@@ -431,15 +494,24 @@ function assembleTurn(
       const first = unique[0];
       reply = `${first.name} is $${first.memberPrice.toFixed(2)} and ${first.inStock ? `in stock at ${input.warehouse.name}` : `unavailable at ${input.warehouse.name}`}. Would you like to see the product page?`;
     } else if (unmetDemand) {
-      reply = "I do not have a strong catalog match. I logged that as unmet demand so merch can source it. You will get a preorder notice if it is approved.";
+      reply = inventoryRequestRecorded(unmetDemand.rawText);
+    } else if (askToRequestInventory) {
+      reply = inventoryRequestPrompt(last.content);
+    } else if (assistantOfferedInventoryRequest(input.messages) && isInventoryDecline(last.content)) {
+      reply = "No problem — we can keep looking in the warehouse catalog.";
     } else {
       reply = "I can recommend items from this warehouse catalog. Tell me what you need — a TV size, household staple, or furniture piece.";
     }
+  } else if (askToRequestInventory && !/inventor|request it/i.test(reply)) {
+    reply = `${reply} ${inventoryRequestPrompt(last.content)}`.trim();
+  } else if (unmetDemand && !/sent that request|inventor/i.test(reply)) {
+    reply = `${reply} ${inventoryRequestRecorded(unmetDemand.rawText)}`.trim();
   }
   return {
     reply,
     recommendations: unique.map(toRecommendation),
     askToView: unique.length > 0,
+    askToRequestInventory,
     cartActions: state.cartActions,
     unmetDemand,
     cartSummary: state.showCart || state.cartActions.length
@@ -453,12 +525,12 @@ function catalogFallbackTurn(
   last: ChatMessage,
   seeded: CatalogMatch[],
 ): AssistantTurnResult {
-  if (looksUnmet(last.content)) {
+  if (assistantOfferedInventoryRequest(input.messages) || looksUnmet(last.content) || (!seeded.length && looksLikeProductSeek(last.content))) {
     return assembleTurn(input, last, seeded, {
       reply: "",
       recommended: [],
       cartActions: [],
-      unmetDemand: { rawText: last.content },
+      unmetDemand: looksUnmet(last.content) ? { rawText: last.content } : null,
       showCart: false,
     });
   }
