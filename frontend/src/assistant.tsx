@@ -341,6 +341,7 @@ function AssistantWidget({ open, pending, onConsumed, onClose, onOpen }: {
       },
       onTranscript: (role, text) => {
         if (!text.trim()) return;
+        if (role === "user") pendingVoiceProducts.current = [];
         const extra = role === "assistant" && pendingVoiceProducts.current.length
           ? { productIds: pendingVoiceProducts.current, awaitingView: true }
           : undefined;
@@ -349,6 +350,10 @@ function AssistantWidget({ open, pending, onConsumed, onClose, onOpen }: {
       },
       onProducts: (productIds) => attachVoiceProducts(productIds),
       onTool: (name, args) => {
+        if (name === "search_catalog") {
+          pendingVoiceProducts.current = [];
+          return;
+        }
         if (name === "add_to_cart" && typeof args.product_id === "string") {
           add(args.product_id, typeof args.quantity === "number" ? args.quantity : 1);
           attachVoiceProducts([args.product_id]);

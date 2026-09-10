@@ -6,7 +6,7 @@ import { readCustomerIssues, readStockRequests } from "../src/issue-log.js";
 import { createApp } from "../src/app.js";
 import { createDatabase, type DatabaseContext } from "../src/db.js";
 import { runAssistantTurn } from "../src/grok.js";
-import { closableVoiceCode, executeVoiceTool } from "../src/voice.js";
+import { closableVoiceCode, executeVoiceTool, voiceCardsToShow } from "../src/voice.js";
 import { cartSpreadPrompt, generateImagine, placeholderSvg } from "../src/imagine.js";
 import { captureUnmetDemand, decidePurchase, ensureProductImages, getKirkHome } from "../src/kirk.js";
 import { wiringFromEnv } from "../src/grokbot.js";
@@ -187,9 +187,13 @@ describe("Kirk home and demand loop", () => {
 
   it("resolves voice catalog tools so Grok can keep talking", () => {
     const search = executeVoiceTool("search_catalog", { query: "65 inch tv" }, "w1");
-    expect(search.productIds.length).toBeGreaterThan(0);
-    const rec = executeVoiceTool("recommend_products", { product_ids: search.productIds }, "w1");
-    expect(rec.productIds).toEqual(search.productIds.slice(0, 3));
+    const hits = (search.output as Array<{ id: string }>).map((row) => row.id);
+    expect(hits.length).toBeGreaterThan(0);
+    expect(search.productIds).toEqual([]);
+    expect(voiceCardsToShow("search_catalog", hits)).toEqual([]);
+    const rec = executeVoiceTool("recommend_products", { product_ids: hits.slice(0, 3) }, "w1");
+    expect(rec.productIds.length).toBeGreaterThan(0);
+    expect(voiceCardsToShow("recommend_products", rec.productIds)).toEqual(rec.productIds);
   });
 });
 

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mergeVoiceUtterance, resampleTo24k, VoiceUtteranceBuffer, voiceTranscriptFromEvent } from "./voice-client";
+import { mergeVoiceUtterance, resampleTo24k, storefrontIdsFromVoiceEvent, VoiceUtteranceBuffer, voiceTranscriptFromEvent } from "./voice-client";
 
 describe("voice client helpers", () => {
   it("resamples hardware-rate PCM down to 24 kHz", () => {
@@ -14,6 +14,23 @@ describe("voice client helpers", () => {
   it("keeps 24 kHz audio unchanged", () => {
     const input = new Float32Array([0.25, -0.5]);
     expect(resampleTo24k(input, 24000)).toBe(input);
+  });
+
+  it("does not show catalog search hits as product cards", () => {
+    expect(storefrontIdsFromVoiceEvent({
+      type: "kirk.products",
+      productIds: ["1", "4", "9565020"],
+    })).toEqual([]);
+    expect(storefrontIdsFromVoiceEvent({
+      type: "kirk.products",
+      tool: "search_catalog",
+      productIds: ["1", "4", "9565020"],
+    })).toEqual([]);
+    expect(storefrontIdsFromVoiceEvent({
+      type: "kirk.products",
+      tool: "recommend_products",
+      productIds: ["9565020", "4"],
+    })).toEqual(["9565020", "4"]);
   });
 
   it("reads finished user and assistant transcripts from xAI event names", () => {

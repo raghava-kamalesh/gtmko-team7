@@ -125,6 +125,13 @@ export function resampleTo24k(input: Float32Array, fromRate: number): Float32Arr
   return out;
 }
 
+export function storefrontIdsFromVoiceEvent(payload: Record<string, unknown>): string[] | null {
+  if (String(payload.type ?? "") !== "kirk.products" || !Array.isArray(payload.productIds)) return null;
+  const tool = String(payload.tool ?? "");
+  if (tool !== "recommend_products" && tool !== "add_to_cart") return [];
+  return payload.productIds.map((id) => String(id)).filter(Boolean);
+}
+
 export function voiceTranscriptFromEvent(payload: Record<string, unknown>): { role: "user" | "assistant"; text: string } | null {
   const type = String(payload.type ?? "");
   if (type === "conversation.item.input_audio_transcription.completed") {
@@ -296,9 +303,8 @@ export class KirkVoiceSession {
     if (type === "response.output_audio_transcript.delta" || type === "response.audio_transcript.delta") {
       if (typeof payload.delta === "string") this.assistantBuf += payload.delta;
     }
-    if (type === "kirk.products" && Array.isArray(payload.productIds)) {
-      this.handlers.onProducts?.(payload.productIds.map((id) => String(id)));
-    }
+    const storefrontIds = storefrontIdsFromVoiceEvent(payload);
+    if (storefrontIds?.length) this.handlers.onProducts?.(storefrontIds);
     const line = voiceTranscriptFromEvent({
       ...payload,
       transcript: payload.transcript ?? (type.endsWith(".done") ? this.assistantBuf : payload.transcript),

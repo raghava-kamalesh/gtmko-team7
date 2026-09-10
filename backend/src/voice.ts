@@ -36,7 +36,7 @@ export function executeVoiceTool(
       limit: typeof args.limit === "number" ? args.limit : 6,
       warehouseId,
     });
-    return { output: matches.map(summarizeMatch), productIds: matches.slice(0, 3).map((item) => item.id) };
+    return { output: matches.map(summarizeMatch), productIds: [] };
   }
   if (name === "recommend_products") {
     const ids = Array.isArray(args.product_ids) ? args.product_ids.map((id) => String(id)) : [];
@@ -55,6 +55,11 @@ export function executeVoiceTool(
     return { output: { ok: true, queued: true }, productIds: [] };
   }
   return { output: { error: `Unknown tool ${name}` }, productIds: [] };
+}
+
+export function voiceCardsToShow(toolName: string, productIds: string[]): string[] {
+  if (toolName !== "recommend_products" && toolName !== "add_to_cart") return [];
+  return productIds.filter(Boolean);
 }
 
 export function kirkVoiceTools() {
@@ -236,7 +241,8 @@ function fulfillVoiceTool(
     }));
     upstream.send(JSON.stringify({ type: "response.create" }));
   }
-  if (client.readyState === WebSocket.OPEN && result.productIds.length) {
-    client.send(JSON.stringify({ type: "kirk.products", productIds: result.productIds }));
+  const productIds = voiceCardsToShow(name, result.productIds);
+  if (client.readyState === WebSocket.OPEN && productIds.length) {
+    client.send(JSON.stringify({ type: "kirk.products", productIds, tool: name }));
   }
 }
