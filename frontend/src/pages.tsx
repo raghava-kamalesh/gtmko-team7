@@ -4,6 +4,7 @@ import { getKirkHome, placeKirkPreorder } from "./api";
 import { categories, warehouses } from "./data";
 import { Empty, ProductCard, Quantity } from "./components";
 import { useAssistant } from "./assistant";
+import { useProductImages } from "./product-images";
 import { fallbackKirkHome } from "./kirk-home";
 import { useStore } from "./store";
 import type { KirkHome, Product, Shipping } from "./types";
@@ -79,6 +80,7 @@ export function ProductDetail() {
   const { id } = useParams();
   const { products, warehouse, add } = useStore();
   const { openAssistant } = useAssistant();
+  const { urlFor } = useProductImages();
   const product = products.find(p => p.id === id);
   if (!product) return <Empty title="Product not found" text="This item may no longer be available." action={<Link to="/">Go home</Link>} />;
   const stock = product.stockByWarehouse[warehouse.id] || 0;
@@ -89,7 +91,7 @@ export function ProductDetail() {
     <div className="product-detail">
       <div className="breadcrumbs"><Link to="/">Home</Link> / <Link to={`/category/${product.category}`}>{categoryName}</Link> / {product.name}</div>
       <div className="detail-grid">
-        <div className="detail-image"><img src={product.image} alt={product.name} /></div>
+        <div className="detail-image"><img src={urlFor(product.id, product.image)} alt={product.name} /></div>
         <div>
           {product.badge && <span className="badge">{product.badge}</span>}
           {product.brand && <p className="product-brand">{product.brand}</p>}

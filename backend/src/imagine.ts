@@ -6,7 +6,7 @@ import { ApiError } from "./http.js";
 const XAI_IMAGES_URL = "https://api.x.ai/v1/images/generations";
 const DEFAULT_MODEL = "grok-imagine-image";
 
-export type ImagineKind = "category_hero" | "cart_spread";
+export type ImagineKind = "category_hero" | "cart_spread" | "product_card";
 
 export type ImagineInput = {
   kind: ImagineKind;
@@ -29,7 +29,10 @@ function mediaDir(): string {
 
 function placeholderResult(input: ImagineInput, model: string): ImagineResult {
   return {
-    url: placeholderSvg(input.kind === "cart_spread" ? "Cart spread" : "Category hero", input.prompt.slice(0, 80)),
+    url: placeholderSvg(
+      input.kind === "cart_spread" ? "Cart spread" : input.kind === "product_card" ? "Product" : "Category hero",
+      input.prompt.slice(0, 80),
+    ),
     model,
     source: "placeholder",
     prompt: input.prompt,
@@ -62,6 +65,20 @@ export function heroPrompt(label: string, reason: string): string {
     reason ? `Member context: ${reason}.` : "",
     "Look like a warehouse wholesale club, not a boutique grocery.",
   ].filter(Boolean).join(" ");
+}
+
+export function productCardPrompt(product: { name: string; brand?: string; category?: string; description?: string }): string {
+  return [
+    `Photorealistic product photograph of ${product.brand ? `${product.brand} ` : ""}${product.name}.`,
+    product.category ? `Sold in the ${product.category} aisle of a warehouse club.` : "",
+    product.description ? product.description.slice(0, 160) : "",
+    "Clean retail pack shot, bulk member size visible, light background, no logos, no text overlays, no people.",
+  ].filter(Boolean).join(" ");
+}
+
+export function publicMediaUrl(url: string): string {
+  if (url.startsWith("/kirk/media/")) return `/api${url}`;
+  return url;
 }
 
 export function cartSpreadPrompt(items: Array<{ name?: string; brand?: string; quantity?: number }>): string {
@@ -104,7 +121,7 @@ export async function generateImagine(
     model,
     prompt: input.prompt,
     n: 1,
-    aspect_ratio: input.kind === "category_hero" ? "16:9" : "4:3",
+    aspect_ratio: input.kind === "category_hero" ? "16:9" : input.kind === "product_card" ? "1:1" : "4:3",
     response_format: "b64_json",
   };
   if (input.referenceImageUrls?.length) {

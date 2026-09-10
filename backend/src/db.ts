@@ -133,6 +133,11 @@ CREATE TABLE IF NOT EXISTS kirk_category_heroes (
   image_url text, source text NOT NULL DEFAULT 'placeholder',
   updated_at timestamptz NOT NULL DEFAULT now()
 );
+CREATE TABLE IF NOT EXISTS kirk_product_images (
+  id text PRIMARY KEY, product_id text NOT NULL UNIQUE, image_url text,
+  source text NOT NULL DEFAULT 'placeholder', prompt text NOT NULL DEFAULT '',
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
 CREATE TABLE IF NOT EXISTS kirk_feedback (
   id text PRIMARY KEY, member_key text NOT NULL, type text NOT NULL, details text NOT NULL,
   transcript jsonb NOT NULL, linear_issue_id text, linear_identifier text, linear_url text,

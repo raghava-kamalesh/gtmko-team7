@@ -65,6 +65,13 @@ export function captureKirkDemand(body: { rawText: string; category?: string; me
   return api<{ request: { id: string; status: string } }>("/api/kirk/demand", { method: "POST", body: JSON.stringify(body) });
 }
 
+export function ensureKirkProductImages(ids: string[]) {
+  return api<Array<{ productId: string; url: string; source: string; cached: boolean }>>("/api/kirk/product-images", {
+    method: "POST",
+    body: JSON.stringify({ ids }),
+  });
+}
+
 export function imagineCart(cart: Array<{ productId: string; name?: string; brand?: string; imageUrl?: string; quantity: number }>) {
   return api<{ url: string; source: string; prompt: string }>("/api/assistant/imagine", {
     method: "POST", body: JSON.stringify({ kind: "cart_spread", cart }),

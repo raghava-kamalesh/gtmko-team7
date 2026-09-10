@@ -3,13 +3,13 @@ import { useNavigate } from "react-router-dom";
 import {
   captureKirkDemand,
   createVoiceSession,
-  imagineCart,
   sendAssistantChat,
   submitKirkFeedback,
 } from "./api";
 import { useStore } from "./store";
 import type { Product } from "./types";
-import { KirkVoiceSession, type VoiceStatus } from "./voice-client";
+import { ensureProductImages, useProductImages } from "./product-images";
+import { KirkVoiceSession, mergeVoiceUtterance, type VoiceStatus } from "./voice-client";
 
 type AssistantApi = { openAssistant: (prompt?: string) => void };
 const AssistantContext = createContext<AssistantApi>({ openAssistant: () => {} });
@@ -45,20 +45,26 @@ export function insertAfterLine(lines: ChatLine[], afterId: string | undefined, 
   return [...lines.slice(0, index + 1), line, ...lines.slice(index + 1)];
 }
 
-export function isAffirmative(text: string) {
-  return /^(y|yes|yeah|yep|yup|sure|ok|okay|please|show me|open it|go ahead|do it)\b/i.test(text.trim());
-}
-
-export function isNegative(text: string) {
-  return /^(n|no|nope|nah|not now|later|skip)\b/i.test(text.trim());
-}
-
-export function replyAsksToView(reply: string) {
-  return /would you like to see|want to (see|open|view)|shall i (open|show)|product page/i.test(reply);
-}
-
-function viewQuestion(product: Product) {
-  return `Would you like to see the product page for ${product.name}?`;
+export function upsertVoiceLine(lines: ChatLine[], role: ChatLine["role"], text: string, extra?: Partial<ChatLine>): ChatLine[] {
+  const last = lines.at(-1);
+  if (last?.role === role) {
+    const merged = role === "user" ? mergeVoiceUtterance(last.text, text) : (text.length >= last.text.length ? text : last.text);
+    const productIds = extra?.productIds ?? last.productIds;
+    return [...lines.slice(0, -1), {
+      ...last,
+      ...extra,
+      text: merged,
+      productIds,
+      awaitingView: extra?.awaitingView ?? (Boolean(productIds?.length) || last.awaitingView),
+    }];
+  }
+  return [...lines, {
+    id: newId(),
+    role,
+    text,
+    ...extra,
+    awaitingView: extra?.awaitingView ?? Boolean(extra?.productIds?.length),
+  }];
 }
 
 export const HeadsetIcon = ({ size = 26 }: { size?: number }) => (
@@ -107,15 +113,17 @@ function AssistantWidget({ open, pending, onConsumed, onClose, onOpen }: {
   open: boolean; pending?: { id: string; text: string }; onConsumed: () => void; onClose: () => void; onOpen: () => void;
 }) {
   const { products, warehouse, cart, add, cartCount, cartTotal, user } = useStore();
+  const { urlFor } = useProductImages();
   const navigate = useNavigate();
   const [expanded, setExpanded] = useState(false);
   const [input, setInput] = useState("");
   const [lines, setLines] = useState<ChatLine[]>(readLines);
   const [busy, setBusy] = useState(false);
   const [feedbackOpen, setFeedbackOpen] = useState(false);
-  const [feedbackType, setFeedbackType] = useState<"bug" | "wish" | "interaction">("bug");
   const [feedbackText, setFeedbackText] = useState("");
   const [feedbackNote, setFeedbackNote] = useState("");
+  const [requestOpen, setRequestOpen] = useState(false);
+  const [requestText, setRequestText] = useState("");
   const [voiceStatus, setVoiceStatus] = useState<VoiceStatus>("idle");
   const [voiceDetail, setVoiceDetail] = useState("");
   const log = useRef<HTMLDivElement>(null);
@@ -123,6 +131,7 @@ function AssistantWidget({ open, pending, onConsumed, onClose, onOpen }: {
   const handledPending = useRef<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const voiceRef = useRef<KirkVoiceSession | null>(null);
+  const pendingVoiceProducts = useRef<string[]>([]);
   linesRef.current = lines;
 
   const opened = useRef(false);
@@ -131,15 +140,6 @@ function AssistantWidget({ open, pending, onConsumed, onClose, onOpen }: {
 
   const productById = (id: string) => products.find((item) => item.id === id);
   const memberKey = user?.email ?? "demo";
-
-  const offerLine = [...lines].reverse().find((line) => line.awaitingView && line.productIds?.[0]);
-  const offered = offerLine?.productIds?.[0] ? productById(offerLine.productIds[0]) : undefined;
-  const requestLine = [...lines].reverse().find((line) => line.awaitingInventoryRequest);
-  const requestSeek = (() => {
-    if (!requestLine) return "";
-    const index = lines.findIndex((line) => line.id === requestLine.id);
-    return [...lines.slice(0, index)].reverse().find((line) => line.role === "user")?.text ?? "";
-  })();
 
   const commitLines = (next: ChatLine[]) => {
     linesRef.current = next;
@@ -158,15 +158,6 @@ function AssistantWidget({ open, pending, onConsumed, onClose, onOpen }: {
     navigate(`/product/${product.id}`);
   };
 
-  const declineProduct = (product: Product, afterId?: string) => {
-    const base = clearAwaiting(linesRef.current);
-    commitLines(insertAfterLine(base, afterId, {
-      id: newId(),
-      role: "assistant",
-      text: `No problem — we can keep looking. What else would you like instead of ${product.name}?`,
-    }));
-  };
-
   const applyCartActions = (actions: Array<{ productId: string; quantity: number }> | undefined) => {
     for (const action of actions ?? []) {
       if (productById(action.productId)) add(action.productId, action.quantity);
@@ -177,6 +168,11 @@ function AssistantWidget({ open, pending, onConsumed, onClose, onOpen }: {
     if (open && !opened.current) setLines(readLines());
     opened.current = open;
   }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    void ensureProductImages(lines.flatMap((line) => line.productIds ?? []));
+  }, [open, lines]);
 
   const sendTurn = async (text: string, image?: { mimeType: string; data: string; preview: string }, options?: { userAlreadyListed?: boolean }) => {
     if (busy) return;
@@ -202,11 +198,9 @@ function AssistantWidget({ open, pending, onConsumed, onClose, onOpen }: {
       const matched = result.recommendations
         .map((item) => productById(item.id))
         .filter((item): item is Product => Boolean(item));
+      void ensureProductImages(matched.map((item) => item.id));
       const primary = matched[0];
       let reply = result.reply.trim();
-      if (primary && (result.askToView || matched.length) && !replyAsksToView(reply)) {
-        reply = `${reply} ${viewQuestion(primary)}`.trim();
-      }
       if (result.unmetDemand && !/sent that request|inventor/i.test(reply)) {
         reply = `${reply} I sent that request to merch so they can review adding it to inventory.`.trim();
       }
@@ -249,42 +243,30 @@ function AssistantWidget({ open, pending, onConsumed, onClose, onOpen }: {
   };
 
   const handleUserText = async (text: string) => {
-    if (offered && isAffirmative(text)) {
-      const userLine = { id: newId(), role: "user" as const, text };
-      commitLines([...linesRef.current, userLine]);
-      openProduct(offered, userLine.id);
-      return;
-    }
-    if (offered && isNegative(text)) {
-      const userLine = { id: newId(), role: "user" as const, text };
-      commitLines([...linesRef.current, userLine]);
-      declineProduct(offered, userLine.id);
-      return;
-    }
-    if (requestLine && isAffirmative(text)) {
-      const userLine = { id: newId(), role: "user" as const, text };
-      commitLines([...linesRef.current, userLine]);
-      const detail = text.replace(/^(y|yes|yeah|yep|yup|sure|ok|okay|please|do it|request it|add it)\b[,!.]?\s*/i, "").trim();
-      await submitInventoryRequest(userLine, detail.length >= 8 ? detail : (requestSeek || text));
-      return;
-    }
-    if (requestLine && isNegative(text)) {
-      const userLine = { id: newId(), role: "user" as const, text };
-      commitLines([...linesRef.current, userLine]);
-      commitLines(insertAfterLine(clearAwaiting(linesRef.current), userLine.id, {
-        id: newId(),
-        role: "assistant",
-        text: "No problem — we can keep looking in the warehouse catalog.",
-      }));
-      return;
-    }
-    if (requestLine) {
-      const userLine = { id: newId(), role: "user" as const, text };
-      commitLines([...linesRef.current, userLine]);
-      await submitInventoryRequest(userLine, text);
-      return;
-    }
     await sendTurn(text);
+  };
+
+  const submitStockRequest = async (e: FormEvent) => {
+    e.preventDefault();
+    const description = requestText.trim();
+    if (!description) return;
+    const userLine = { id: newId(), role: "user" as const, text: description };
+    commitLines([...linesRef.current, userLine]);
+    setRequestOpen(false);
+    setRequestText("");
+    await submitInventoryRequest(userLine, description);
+  };
+
+  const attachVoiceProducts = (productIds: string[]) => {
+    const ids = productIds.filter((id) => productById(id));
+    void ensureProductImages(ids);
+    if (!ids.length) return;
+    const last = linesRef.current.at(-1);
+    if (last?.role === "assistant") {
+      commitLines(upsertVoiceLine(linesRef.current, "assistant", last.text, { productIds: ids, awaitingView: true }));
+      return;
+    }
+    pendingVoiceProducts.current = ids;
   };
 
   useEffect(() => {
@@ -316,29 +298,6 @@ function AssistantWidget({ open, pending, onConsumed, onClose, onOpen }: {
     setInput("");
   };
 
-  const requestSpread = async () => {
-    if (busy) return;
-    setBusy(true);
-    const userLine = { id: newId(), role: "user" as const, text: "Visualize my current cart as a party spread." };
-    commitLines([...linesRef.current, userLine]);
-    try {
-      const result = await imagineCart(cart.map((item) => {
-        const product = productById(item.productId);
-        return { productId: item.productId, name: product?.name, brand: product?.brand, imageUrl: product?.image, quantity: item.quantity };
-      }));
-      commitLines(insertAfterLine(linesRef.current, userLine.id, {
-        id: newId(),
-        role: "assistant",
-        text: cart.length ? "Here is an Imagine spread grounded in the SKUs in your cart." : "Add a few items first and I can picture the table.",
-        imagineUrl: result.url,
-      }));
-    } catch {
-      commitLines(insertAfterLine(linesRef.current, userLine.id, { id: newId(), role: "assistant", text: "I couldn't generate the cart spread. Try again in a moment." }));
-    } finally {
-      setBusy(false);
-    }
-  };
-
   const toggleVoice = async () => {
     if (voiceStatus === "live" || voiceStatus === "connecting" || voiceStatus === "reconnecting") {
       voiceRef.current?.stop();
@@ -352,11 +311,20 @@ function AssistantWidget({ open, pending, onConsumed, onClose, onOpen }: {
       },
       onTranscript: (role, text) => {
         if (!text.trim()) return;
-        commitLines([...linesRef.current, { id: newId(), role, text }]);
+        const extra = role === "assistant" && pendingVoiceProducts.current.length
+          ? { productIds: pendingVoiceProducts.current, awaitingView: true }
+          : undefined;
+        if (role === "assistant") pendingVoiceProducts.current = [];
+        commitLines(upsertVoiceLine(linesRef.current, role, text, extra));
       },
+      onProducts: (productIds) => attachVoiceProducts(productIds),
       onTool: (name, args) => {
         if (name === "add_to_cart" && typeof args.product_id === "string") {
           add(args.product_id, typeof args.quantity === "number" ? args.quantity : 1);
+          attachVoiceProducts([args.product_id]);
+        }
+        if (name === "recommend_products" && Array.isArray(args.product_ids)) {
+          attachVoiceProducts(args.product_ids.map((id) => String(id)));
         }
         if (name === "capture_unmet_demand" && typeof args.raw_text === "string") {
           void captureKirkDemand({ rawText: args.raw_text, category: typeof args.category === "string" ? args.category : undefined, memberKey });
@@ -374,7 +342,7 @@ function AssistantWidget({ open, pending, onConsumed, onClose, onOpen }: {
         setVoiceDetail("Live voice needs XAI_API_KEY on the API server.");
         return;
       }
-      await session.start(descriptor);
+      await session.start({ ...descriptor, warehouseId: warehouse.id });
     } catch {
       setVoiceStatus("error");
       setVoiceDetail("Could not start a Grok Voice session.");
@@ -386,16 +354,16 @@ function AssistantWidget({ open, pending, onConsumed, onClose, onOpen }: {
     if (!feedbackText.trim()) return;
     try {
       const result = await submitKirkFeedback({
-        type: feedbackType,
+        type: "bug",
         details: feedbackText.trim(),
         transcript: linesRef.current.slice(-12),
         memberKey,
       });
-      setFeedbackNote(`Thanks — Kirk sent this to engineering. ${result.linearIdentifier ?? "Ticket"} is ready for review.`);
+      setFeedbackNote(`Thanks — Kirk filed this issue. ${result.linearIdentifier ?? "Ticket"} is ready for review.`);
       setFeedbackText("");
       setFeedbackOpen(false);
     } catch {
-      setFeedbackNote("Feedback could not be sent. Try again.");
+      setFeedbackNote("The issue could not be sent. Try again.");
     }
   };
 
@@ -413,7 +381,7 @@ function AssistantWidget({ open, pending, onConsumed, onClose, onOpen }: {
       >
         <span className="assistant-prompt">
           <b>Would you like to talk to Kirk?</b>
-          <small>Chat, live voice, photos, and Imagine</small>
+          <small>Chat, live voice, and photos</small>
         </span>
         <span className="assistant-icon"><HeadsetIcon /></span>
       </button>
@@ -432,31 +400,23 @@ function AssistantWidget({ open, pending, onConsumed, onClose, onOpen }: {
           {voiceStatus === "live" ? "Stop voice" : voiceStatus === "connecting" || voiceStatus === "reconnecting" ? "Connecting…" : "Start voice"}
         </button>
         <button type="button" className="secondary" onClick={() => fileRef.current?.click()}>Upload photo</button>
-        <button type="button" className="secondary" onClick={() => void requestSpread()}>Imagine spread</button>
-        <button type="button" className="secondary" onClick={() => setFeedbackOpen((value) => !value)}>Feedback</button>
+        <button type="button" className="secondary" onClick={() => setFeedbackOpen((value) => !value)}>Report issue</button>
         <button type="button" className="text-btn" onClick={() => navigate("/cart")}>Cart · {cartCount}</button>
       </div>
       {voiceDetail && <p className={`kirk-voice-status is-${voiceStatus}`} role="status">{voiceDetail}</p>}
       {feedbackOpen && <form className="kirk-feedback" onSubmit={sendFeedback}>
-        <label>Type
-          <select aria-label="Feedback type" value={feedbackType} onChange={(e) => setFeedbackType(e.target.value as typeof feedbackType)}>
-            <option value="bug">Bug</option>
-            <option value="wish">Wish</option>
-            <option value="interaction">Interaction</option>
-          </select>
-        </label>
         <label>Details
-          <textarea aria-label="Feedback details" rows={3} value={feedbackText} onChange={(e) => setFeedbackText(e.target.value)} required placeholder="What happened, or what do you wish Kirk did?" />
+          <textarea aria-label="Issue details" rows={3} value={feedbackText} onChange={(e) => setFeedbackText(e.target.value)} required placeholder="What went wrong, or what should Kirk have done?" />
         </label>
-        <button className="primary" type="submit">Send to engineering</button>
+        <button className="primary" type="submit">Submit issue</button>
       </form>}
       {feedbackNote && <p className="kirk-feedback-note" role="status">{feedbackNote}</p>}
       <div className="assistant-log" ref={log}>
-        {lines.length === 0 && !busy && <p className="assistant-empty">Ask Kirk what you need. I can recommend warehouse items, add them to your cart, read a photo, or Imagine the spread.</p>}
+        {lines.length === 0 && !busy && <p className="assistant-empty">Ask Kirk what you need. I can recommend warehouse items, add them to your cart, or read a photo.</p>}
         {lines.map((line) => {
           const recs = (line.productIds ?? []).map(productById).filter((item): item is Product => Boolean(item));
-          const isOffer = line.awaitingView && offerLine?.id === line.id && offered;
-          const isRequest = line.awaitingInventoryRequest && requestLine?.id === line.id;
+          const lastAssistant = [...lines].reverse().find((item) => item.role === "assistant");
+          const showNeedHelp = line.role === "assistant" && lastAssistant?.id === line.id && !busy;
           return (
             <article className={`assistant-msg is-${line.role}`} key={line.id}>
               <p className="assistant-msg-text">{line.text}</p>
@@ -469,7 +429,7 @@ function AssistantWidget({ open, pending, onConsumed, onClose, onOpen }: {
                     commitLines([...linesRef.current, userLine]);
                     openProduct(product, userLine.id);
                   }}>
-                    <img src={product.image} alt="" />
+                    <img src={urlFor(product.id, product.image)} alt="" />
                     <div>
                       <b>{product.name}</b>
                       <small>Member price ${(product.memberPrice || 0).toFixed(2)} · {warehouse.name}</small>
@@ -478,33 +438,10 @@ function AssistantWidget({ open, pending, onConsumed, onClose, onOpen }: {
                   <button type="button" className="assistant-card-add" onClick={() => add(product.id)}>Add to cart</button>
                 </div>
               )}</div>}
-              {isOffer && offered && <div className="assistant-actions">
-                <button type="button" className="primary" onClick={() => {
-                  const userLine = { id: newId(), role: "user" as const, text: "Yes" };
-                  commitLines([...linesRef.current, userLine]);
-                  openProduct(offered, userLine.id);
-                }}>Yes, show product page</button>
-                <button type="button" className="secondary" onClick={() => {
-                  const userLine = { id: newId(), role: "user" as const, text: "Not now" };
-                  commitLines([...linesRef.current, userLine]);
-                  declineProduct(offered, userLine.id);
-                }}>Not now</button>
-              </div>}
-              {isRequest && <div className="assistant-actions">
-                <button type="button" className="primary" onClick={() => {
-                  const userLine = { id: newId(), role: "user" as const, text: "Yes, request it" };
-                  commitLines([...linesRef.current, userLine]);
-                  void submitInventoryRequest(userLine, requestSeek || "Requested a missing catalog item");
-                }}>Yes, request it</button>
-                <button type="button" className="secondary" onClick={() => {
-                  const userLine = { id: newId(), role: "user" as const, text: "No thanks" };
-                  commitLines([...linesRef.current, userLine]);
-                  commitLines(insertAfterLine(clearAwaiting(linesRef.current), userLine.id, {
-                    id: newId(),
-                    role: "assistant",
-                    text: "No problem — we can keep looking in the warehouse catalog.",
-                  }));
-                }}>No thanks</button>
+              {showNeedHelp && <div className="assistant-actions">
+                <button type="button" className="secondary" onClick={() => setRequestOpen(true)}>
+                  Can't find what you need?
+                </button>
               </div>}
             </article>
           );
@@ -516,8 +453,34 @@ function AssistantWidget({ open, pending, onConsumed, onClose, onOpen }: {
         <label className="assistant-field">Ask Kirk<input value={input} onChange={(e) => setInput(e.target.value)} placeholder="Ask about items, stock, or your cart" disabled={busy} /></label>
         <input ref={fileRef} type="file" accept="image/*" hidden onChange={(e) => { const file = e.target.files?.[0]; if (file) void onPickImage(file); e.target.value = ""; }} />
         <button className="primary" type="submit" disabled={busy}>Send</button>
-        <small>{requestLine ? "Say yes to request it for inventory, or describe exactly what you want" : offered ? "Say yes to open the product page, or ask for something else" : `Cart ${cartCount} · $${cartTotal.toFixed(2)} · Feedback goes to GrokBot`}</small>
+        <small>{voiceStatus === "live" ? "Kirk is listening — speak and I will answer out loud" : `Cart ${cartCount} · $${cartTotal.toFixed(2)}`}</small>
       </form>
+      {requestOpen && <div className="kirk-request-overlay" onClick={() => setRequestOpen(false)}>
+        <form
+          className="kirk-request-dialog"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="kirk-request-title"
+          onClick={(event) => event.stopPropagation()}
+          onSubmit={submitStockRequest}
+        >
+          <h3 id="kirk-request-title">Can't find what you need?</h3>
+          <label>What you're looking for
+            <textarea
+              aria-label="Stock request details"
+              rows={4}
+              value={requestText}
+              onChange={(e) => setRequestText(e.target.value)}
+              required
+              placeholder="Tell us what you're looking for. We're always looking to stock new items, but can't guarantee new availability."
+            />
+          </label>
+          <div className="kirk-request-actions">
+            <button className="primary" type="submit">Submit request</button>
+            <button className="secondary" type="button" onClick={() => setRequestOpen(false)}>Cancel</button>
+          </div>
+        </form>
+      </div>}
     </section>}
   </>;
 }

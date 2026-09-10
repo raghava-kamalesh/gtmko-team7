@@ -258,6 +258,15 @@ export const kirkCategoryHeroes = pgTable("kirk_category_heroes", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
+export const kirkProductImages = pgTable("kirk_product_images", {
+  id: text("id").primaryKey(),
+  productId: text("product_id").notNull().unique(),
+  imageUrl: text("image_url"),
+  source: text("source").notNull().default("placeholder"),
+  prompt: text("prompt").notNull().default(""),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
 export const kirkFeedback = pgTable("kirk_feedback", {
   id: text("id").primaryKey(),
   memberKey: text("member_key").notNull(),

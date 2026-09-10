@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./main";
@@ -132,18 +132,64 @@ describe("Costco commerce journeys", () => {
     const messages = [...log!.querySelectorAll(".assistant-msg")].map((node) => node.textContent ?? "");
     expect(messages[0]).toContain("I need a 65 inch TV");
     expect(messages[1]).toContain("Sony 65-inch BRAVIA");
-    await user.click(within(panel).getByRole("button", { name: "Yes, show product page" }));
+    expect(within(panel).getByRole("button", { name: "Can't find what you need?" })).toBeInTheDocument();
+    expect(within(panel).queryByRole("button", { name: "Yes, show product page" })).not.toBeInTheDocument();
+    await user.click(within(panel).getByRole("button", { name: /Sony 65/ }));
     expect(await screen.findByRole("heading", { name: /Sony 65" Class - BRAVIA 2 II Series/ })).toBeInTheDocument();
     expect(window.location.pathname).toBe("/product/9565020");
     const stillOpen = screen.getByRole("dialog", { name: "Kirk" });
     expect(within(stillOpen).getByText(/Opening the product page/)).toBeInTheDocument();
     expect(within(stillOpen).getByText("I need a 65 inch TV")).toBeInTheDocument();
     const later = [...stillOpen.querySelectorAll(".assistant-msg")].map((node) => node.textContent ?? "");
-    expect(later.findIndex((text) => text.includes("Yes"))).toBeLessThan(later.findIndex((text) => /Opening the product page/.test(text)));
+    expect(later.findIndex((text) => text.includes("Open Sony"))).toBeLessThan(later.findIndex((text) => /Opening the product page/.test(text)));
     expect(bodies[0]).toMatchObject({
       messages: [{ role: "user", content: "I need a 65 inch TV" }],
       warehouse: { name: "Brooklyn" },
     });
+  });
+
+  it("keeps chat moving and swaps in a product photo when Imagine returns", async () => {
+    const imageIds: string[][] = [];
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/assistant/chat")) {
+        return new Response(JSON.stringify({
+          data: {
+            reply: "The Sony 65-inch BRAVIA is $698.00 and in stock at Brooklyn.",
+            recommendations: [{
+              id: "9565020",
+              name: "Sony 65\" Class - BRAVIA 2 II Series - 4K UHD Smart TV",
+              brand: "Sony",
+              memberPrice: 698,
+              category: "electronics",
+              inStock: true,
+            }],
+            askToView: true,
+          },
+        }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      if (url.includes("/kirk/product-images")) {
+        imageIds.push(JSON.parse(String(init?.body ?? "{}")).ids);
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        return new Response(JSON.stringify({
+          data: [{ productId: "9565020", url: "/api/kirk/media/product-9565020.png", source: "imagine", cached: false }],
+        }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ error: { message: url } }), { status: 404 });
+    });
+    const user = userEvent.setup();
+    open();
+    await user.click(screen.getByRole("button", { name: "Kirk assistant" }));
+    const panel = screen.getByRole("dialog", { name: "Kirk" });
+    await user.type(within(panel).getByPlaceholderText(/Ask about items/), "I need a 65 inch TV");
+    await user.click(within(panel).getByRole("button", { name: "Send" }));
+    expect(await within(panel).findByText(/Sony 65-inch BRAVIA is \$698/)).toBeInTheDocument();
+    const card = within(panel).getByRole("button", { name: /Sony 65/ });
+    expect(card.querySelector("img")?.getAttribute("src")).toMatch(/\/images\/product-/);
+    await waitFor(() => {
+      expect(card.querySelector("img")?.getAttribute("src")).toBe("/api/kirk/media/product-9565020.png");
+    });
+    expect(imageIds[0]).toEqual(["9565020"]);
   });
 
   it("restores the assistant transcript after the panel is closed", async () => {
@@ -162,7 +208,7 @@ describe("Costco commerce journeys", () => {
     expect(within(screen.getByRole("dialog", { name: "Kirk" })).getByText("Need laundry detergent")).toBeInTheDocument();
   });
 
-  it("adds a Kirk recommendation to the cart and submits feedback", async () => {
+  it("adds a Kirk recommendation to the cart and submits an issue report", async () => {
     vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.includes("/assistant/chat")) {
@@ -176,7 +222,8 @@ describe("Costco commerce journeys", () => {
         }), { status: 200, headers: { "Content-Type": "application/json" } });
       }
       if (url.includes("/kirk/feedback")) {
-        expect(JSON.parse(String(init?.body ?? "{}")).type).toBe("wish");
+        const body = JSON.parse(String(init?.body ?? "{}"));
+        expect(body.details).toMatch(/tissue brand/i);
         return new Response(JSON.stringify({ data: { id: "fb1", linearIdentifier: "KIRK-FEED", status: "ready_for_review" } }), { status: 201, headers: { "Content-Type": "application/json" } });
       }
       if (url.includes("/kirk/home")) {
@@ -192,10 +239,10 @@ describe("Costco commerce journeys", () => {
     await user.click(within(panel).getByRole("button", { name: "Send" }));
     expect(await within(panel).findByText(/warehouse staple/)).toBeInTheDocument();
     await user.click(within(panel).getByRole("button", { name: "Add to cart" }));
-    await user.click(within(panel).getByRole("button", { name: "Feedback" }));
-    await user.selectOptions(within(panel).getByLabelText("Feedback type"), "wish");
-    await user.type(within(panel).getByLabelText("Feedback details"), "Remember my last tissue brand");
-    await user.click(within(panel).getByRole("button", { name: "Send to engineering" }));
+    await user.click(within(panel).getByRole("button", { name: "Report issue" }));
+    expect(within(panel).queryByLabelText("Feedback type")).not.toBeInTheDocument();
+    await user.type(within(panel).getByLabelText("Issue details"), "Remember my last tissue brand");
+    await user.click(within(panel).getByRole("button", { name: "Submit issue" }));
     expect(await screen.findByText(/KIRK-FEED/)).toBeInTheDocument();
     await user.click(within(panel).getByRole("button", { name: "Close assistant" }));
     await user.click(screen.getByRole("link", { name: /Cart/ }));
@@ -234,11 +281,14 @@ describe("Costco commerce journeys", () => {
     await user.type(within(panel).getByPlaceholderText(/Ask about items/), "Do you sell Japanese whisky gift sets?");
     await user.click(within(panel).getByRole("button", { name: "Send" }));
     expect(await within(panel).findByText(/request it be added to inventory/)).toBeInTheDocument();
-    expect(within(panel).getByText(/Say yes to request it for inventory/)).toBeInTheDocument();
-    await user.click(within(panel).getByRole("button", { name: "Yes, request it" }));
-    expect(await within(panel).findByText(/sent that request to merch/)).toBeInTheDocument();
+    await user.click(within(panel).getByRole("button", { name: "Can't find what you need?" }));
+    const requestDialog = screen.getByRole("dialog", { name: "Can't find what you need?" });
+    expect(within(requestDialog).getByPlaceholderText(/Tell us what you're looking for/)).toBeInTheDocument();
+    await user.type(within(requestDialog).getByLabelText("Stock request details"), "12-year Yamazaki gift box");
+    await user.click(within(requestDialog).getByRole("button", { name: "Submit request" }));
+    expect(await within(panel).findByText(/They'll see: 12-year Yamazaki gift box/)).toBeInTheDocument();
     expect(demandBodies[0]).toMatchObject({
-      rawText: "Do you sell Japanese whisky gift sets?",
+      rawText: "12-year Yamazaki gift box",
     });
   });
 

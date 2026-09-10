@@ -4,8 +4,10 @@ import kirkMembers from "../../shared/kirk-members.json" with { type: "json" };
 import type { Database } from "./db.js";
 import { preorderEmail, sendMail } from "./email.js";
 import { runFeedbackLoop, searchXTrends, wiringFromEnv, type GrokBotDeps } from "./grokbot.js";
-import { cartSpreadPrompt, generateImagine, heroPrompt, type ImagineResult } from "./imagine.js";
+import { cartSpreadPrompt, generateImagine, heroPrompt, productCardPrompt, publicMediaUrl, type ImagineResult } from "./imagine.js";
 import { ApiError } from "./http.js";
+import { appendCustomerIssue, appendStockRequest } from "./issue-log.js";
+import { getCatalogById } from "./storefront-catalog.js";
 import {
   kirkCategoryHeroes,
   kirkFeedback,
@@ -13,6 +15,7 @@ import {
   kirkOutboundMail,
   kirkPreorderItems,
   kirkPreorders,
+  kirkProductImages,
   kirkPurchaseRequests,
   kirkUnmetIntents,
 } from "./schema.js";
@@ -119,6 +122,96 @@ export async function regenerateHeroes(db: Database, deps: { fetch?: typeof fetc
   return results;
 }
 
+export type KirkProductImage = {
+  productId: string;
+  url: string;
+  source: string;
+  cached: boolean;
+};
+
+const productImageJobs = new Map<string, Promise<KirkProductImage>>();
+
+function clientProductImage(url: string): string {
+  return publicMediaUrl(url);
+}
+
+async function persistProductImage(
+  db: Database,
+  input: { productId: string; url: string; source: string; prompt: string },
+) {
+  await db.insert(kirkProductImages).values({
+    id: `img-${input.productId}`,
+    productId: input.productId,
+    imageUrl: input.url,
+    source: input.source,
+    prompt: input.prompt,
+    updatedAt: new Date(),
+  }).onConflictDoUpdate({
+    target: kirkProductImages.productId,
+    set: { imageUrl: input.url, source: input.source, prompt: input.prompt, updatedAt: new Date() },
+  });
+}
+
+async function generateProductImage(
+  db: Database,
+  productId: string,
+  deps: { fetch?: typeof fetch; apiKey?: string } = {},
+): Promise<KirkProductImage> {
+  const product = getCatalogById(productId);
+  if (!product) {
+    return { productId, url: "", source: "missing", cached: false };
+  }
+  const prompt = productCardPrompt(product);
+  const generated = await generateImagine({
+    kind: "product_card",
+    prompt,
+  }, { fetch: deps.fetch, apiKey: deps.apiKey, persistId: `product-${productId.replace(/[^\w.-]/g, "")}` });
+  const apiKey = deps.apiKey ?? process.env.XAI_API_KEY;
+  if (generated.source === "imagine" || !apiKey) {
+    await persistProductImage(db, {
+      productId,
+      url: generated.url,
+      source: generated.source,
+      prompt: generated.prompt,
+    });
+  }
+  return { productId, url: clientProductImage(generated.url), source: generated.source, cached: false };
+}
+
+export async function ensureProductImages(
+  db: Database,
+  ids: string[],
+  deps: { fetch?: typeof fetch; apiKey?: string } = {},
+): Promise<KirkProductImage[]> {
+  const unique = [...new Set(ids.map((id) => id.trim()).filter(Boolean))].slice(0, 8);
+  if (!unique.length) return [];
+  const existing = await db.select().from(kirkProductImages).where(inArray(kirkProductImages.productId, unique));
+  const have = new Map(existing.filter((row) => row.imageUrl).map((row) => [row.productId, row]));
+  const missing = unique.filter((id) => {
+    const row = have.get(id);
+    return !row || (row.source !== "imagine" && (deps.apiKey ?? process.env.XAI_API_KEY));
+  });
+
+  const generated = await Promise.all(missing.map((id) => {
+    const inflight = productImageJobs.get(id);
+    if (inflight) return inflight;
+    const job = generateProductImage(db, id, deps).finally(() => productImageJobs.delete(id));
+    productImageJobs.set(id, job);
+    return job;
+  }));
+  const fresh = new Map(generated.map((row) => [row.productId, row]));
+
+  return unique.flatMap((id) => {
+    const next = fresh.get(id);
+    if (next?.url) return [next];
+    const row = have.get(id);
+    if (row?.imageUrl) {
+      return [{ productId: id, url: clientProductImage(row.imageUrl), source: row.source, cached: true }];
+    }
+    return [];
+  });
+}
+
 export async function visualizeCart(
   db: Database,
   cart: KirkCartLine[],
@@ -140,6 +233,13 @@ export async function submitFeedback(
   deps: GrokBotDeps = {},
 ) {
   const id = randomUUID();
+  appendCustomerIssue({
+    id,
+    memberKey: input.memberKey,
+    type: input.type,
+    details: input.details,
+    transcript: input.transcript,
+  });
   await db.insert(kirkFeedback).values({
     id,
     memberKey: input.memberKey,
@@ -174,6 +274,12 @@ export async function captureUnmetDemand(
   deps: GrokBotDeps = {},
 ) {
   const intentId = randomUUID();
+  appendStockRequest({
+    id: intentId,
+    memberKey: input.memberKey,
+    idea: input.rawText,
+    category: input.category,
+  });
   await db.insert(kirkUnmetIntents).values({
     id: intentId,
     memberKey: input.memberKey,

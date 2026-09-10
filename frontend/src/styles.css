@@ -776,7 +776,7 @@ footer {
   max-width: 100%;
 }
 .assistant-chip:hover { color: var(--blue); }
-.assistant-chip img { width: 40px; height: 40px; border-radius: var(--radius-sm); object-fit: cover; flex-shrink: 0; background: var(--red); }
+.assistant-chip img { width: 88px; height: 88px; border-radius: var(--radius-sm); object-fit: cover; flex-shrink: 0; background: var(--red); }
 .assistant-chip div { min-width: 0; flex: 1; }
 .assistant-chip b { display: block; font-size: 13px; font-weight: 500; overflow-wrap: anywhere; word-break: break-word; }
 .assistant-chip small { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
@@ -790,6 +790,38 @@ footer {
   font-weight: 500;
   width: 100%;
 }
+.kirk-request-overlay {
+  position: absolute;
+  inset: 0;
+  background: #0006;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  z-index: 5;
+  border-radius: inherit;
+}
+.kirk-request-dialog {
+  width: min(100%, 360px);
+  background: #fff;
+  border-radius: var(--radius-md);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  box-shadow: 0 12px 32px #0003;
+}
+.kirk-request-dialog h3 { margin: 0; font-size: 16px; }
+.kirk-request-dialog label { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--muted); font-weight: 500; }
+.kirk-request-dialog textarea {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  font: inherit;
+  color: var(--ink);
+  resize: vertical;
+}
+.kirk-request-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .assistant-actions { display: flex; flex-wrap: wrap; gap: 8px; min-width: 0; max-width: 100%; }
 .assistant-actions button {
   border-radius: 999px;

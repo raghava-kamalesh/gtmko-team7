@@ -1,10 +1,14 @@
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { readCustomerIssues, readStockRequests } from "../src/issue-log.js";
 import { createApp } from "../src/app.js";
 import { createDatabase, type DatabaseContext } from "../src/db.js";
 import { runAssistantTurn } from "../src/grok.js";
-import { closableVoiceCode } from "../src/voice.js";
+import { closableVoiceCode, executeVoiceTool } from "../src/voice.js";
 import { cartSpreadPrompt, generateImagine, placeholderSvg } from "../src/imagine.js";
-import { captureUnmetDemand, decidePurchase, getKirkHome } from "../src/kirk.js";
+import { captureUnmetDemand, decidePurchase, ensureProductImages, getKirkHome } from "../src/kirk.js";
 import { wiringFromEnv } from "../src/grokbot.js";
 
 const json = async (response: Response) => response.json() as Promise<any>;
@@ -21,6 +25,9 @@ describe("Kirk home and demand loop", () => {
   let app: ReturnType<typeof createApp>;
 
   beforeAll(async () => {
+    process.env.KIRK_ISSUES_PATH = join(mkdtempSync(join(tmpdir(), "kirk-issues-")), "kirk-customer-issues.json");
+    process.env.KIRK_STOCK_REQUESTS_PATH = join(mkdtempSync(join(tmpdir(), "kirk-stock-")), "kirk-stock-requests.json");
+    process.env.KIRK_MEDIA_DIR = mkdtempSync(join(tmpdir(), "kirk-media-"));
     context = await createDatabase("memory://kirk");
     app = createApp(context);
   });
@@ -51,6 +58,10 @@ describe("Kirk home and demand loop", () => {
       }),
     }));
     expect(created.data.request.status).toBe("pending");
+    const logged = readStockRequests();
+    expect(logged.some((row) => row.idea.includes("Japanese whisky gift set"))).toBe(true);
+    expect(logged[0].notionSubmitted).toBe(false);
+    expect(logged[0].notionPageId).toBeNull();
 
     const staff = await json(await app.request("/auth/staff-login", {
       method: "POST",
@@ -113,6 +124,46 @@ describe("Kirk home and demand loop", () => {
     expect(payload.data.linearIdentifier).toMatch(/KIRK-/);
     expect(payload.data.status).toBe("ready_for_review");
     expect(payload.data.wiring.linear).toBe("mocked");
+    const queued = readCustomerIssues();
+    expect(queued.some((row) => row.id === payload.data.id && row.notionSubmitted === false)).toBe(true);
+  });
+
+  it("fills chat product photos in the background and caches them by sku", async () => {
+    const previous = process.env.XAI_API_KEY;
+    delete process.env.XAI_API_KEY;
+    const created = await json(await app.request("/kirk/product-images", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids: ["9565020", "missing-sku"] }),
+    }));
+    expect(created.data).toEqual([
+      expect.objectContaining({ productId: "9565020", cached: false, source: "placeholder" }),
+    ]);
+    const again = await json(await app.request("/kirk/product-images", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids: ["9565020"] }),
+    }));
+    expect(again.data[0].cached).toBe(true);
+    process.env.XAI_API_KEY = previous;
+  });
+
+  it("does not regenerate an Imagine product photo that is already cached", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      data: [{ b64_json: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==" }],
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    const first = await ensureProductImages(context.db, ["1"], {
+      fetch: fetchMock as unknown as typeof fetch,
+      apiKey: "test-key",
+    });
+    expect(first[0]).toEqual(expect.objectContaining({ productId: "1", source: "imagine", cached: false }));
+    expect(first[0].url).toMatch(/\/api\/kirk\/media\/product-1\.png/);
+    const second = await ensureProductImages(context.db, ["1"], {
+      fetch: fetchMock as unknown as typeof fetch,
+      apiKey: "test-key",
+    });
+    expect(second[0].cached).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("maps reserved websocket close codes so the voice proxy does not crash", () => {
@@ -132,6 +183,13 @@ describe("Kirk home and demand loop", () => {
     expect(payload.data.wsPath).toBe("/assistant/voice/live");
     expect(payload.data.instructions).toMatch(/Kirk/);
     expect(payload.data.tools.some((tool: { name: string }) => tool.name === "add_to_cart")).toBe(true);
+  });
+
+  it("resolves voice catalog tools so Grok can keep talking", () => {
+    const search = executeVoiceTool("search_catalog", { query: "65 inch tv" }, "w1");
+    expect(search.productIds.length).toBeGreaterThan(0);
+    const rec = executeVoiceTool("recommend_products", { product_ids: search.productIds }, "w1");
+    expect(rec.productIds).toEqual(search.productIds.slice(0, 3));
   });
 });
 

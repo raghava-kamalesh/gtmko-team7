@@ -1,10 +1,115 @@
 export type VoiceStatus = "idle" | "connecting" | "live" | "reconnecting" | "error";
 
+export const VOICE_SILENCE_MS = 800;
+export const VOICE_SPEECH_RMS = 0.015;
+
 export type VoiceHandlers = {
   onStatus: (status: VoiceStatus, detail?: string) => void;
   onTranscript?: (role: "user" | "assistant", text: string) => void;
+  onProducts?: (productIds: string[]) => void;
   onTool?: (name: string, args: Record<string, unknown>) => void;
 };
+
+export function normalizeVoiceText(text: string): string {
+  return text.toLowerCase().replace(/[^\w\s]/g, "").replace(/\s+/g, " ").trim();
+}
+
+export function mergeVoiceUtterance(current: string, incoming: string): string {
+  const next = incoming.trim().replace(/\s+/g, " ");
+  const prev = current.trim().replace(/\s+/g, " ");
+  if (!next) return prev;
+  if (!prev) return next;
+  const prevNorm = normalizeVoiceText(prev);
+  const nextNorm = normalizeVoiceText(next);
+  if (!nextNorm || nextNorm === prevNorm) return prev.length >= next.length ? prev : next;
+  if (nextNorm.includes(prevNorm)) return next;
+  if (prevNorm.includes(nextNorm)) return prev;
+  return `${prev} ${next}`.replace(/\s+/g, " ");
+}
+
+export function audioRms(input: Float32Array): number {
+  if (!input.length) return 0;
+  let sum = 0;
+  for (let i = 0; i < input.length; i += 1) sum += (input[i] ?? 0) ** 2;
+  return Math.sqrt(sum / input.length);
+}
+
+type TimerHandle = ReturnType<typeof setTimeout>;
+
+export class VoiceUtteranceBuffer {
+  private draft = "";
+  private timer: TimerHandle | null = null;
+  private committed = false;
+  private waitingForTranscript = false;
+
+  constructor(
+    private readonly onCommit: (text: string) => void,
+    private readonly silenceMs = 3000,
+    private readonly schedule: {
+      setTimeout: typeof setTimeout;
+      clearTimeout: typeof clearTimeout;
+    } = {
+      setTimeout: (handler, ms) => globalThis.setTimeout(handler, ms),
+      clearTimeout: (id) => globalThis.clearTimeout(id),
+    },
+  ) {}
+
+  peek() {
+    return this.draft;
+  }
+
+  hear(text: string) {
+    if (this.committed) return this.draft;
+    this.draft = mergeVoiceUtterance(this.draft, text);
+    if (this.waitingForTranscript && this.draft) this.commit();
+    return this.draft;
+  }
+
+  noteSpeech() {
+    if (this.committed) return;
+    this.waitingForTranscript = false;
+    this.clearTimer();
+  }
+
+  noteQuiet() {
+    if (this.committed || this.timer) return;
+    this.timer = this.schedule.setTimeout(() => {
+      this.timer = null;
+      if (this.draft) {
+        this.commit();
+        return;
+      }
+      this.waitingForTranscript = true;
+      this.timer = this.schedule.setTimeout(() => {
+        this.timer = null;
+        this.waitingForTranscript = false;
+      }, 2000);
+    }, this.silenceMs);
+  }
+
+  flush() {
+    if (this.draft) this.commit();
+  }
+
+  clear() {
+    this.clearTimer();
+    this.waitingForTranscript = false;
+  }
+
+  private commit() {
+    if (this.committed) return;
+    const text = this.draft.trim();
+    if (!text) return;
+    this.committed = true;
+    this.clear();
+    this.onCommit(text);
+  }
+
+  private clearTimer() {
+    if (this.timer) this.schedule.clearTimeout(this.timer);
+    this.timer = null;
+  }
+}
 
 export function resampleTo24k(input: Float32Array, fromRate: number): Float32Array {
   if (fromRate === 24000) return input;
@@ -26,7 +131,11 @@ export function voiceTranscriptFromEvent(payload: Record<string, unknown>): { ro
     const text = String(payload.transcript ?? "").trim();
     return text ? { role: "user", text } : null;
   }
-  if (type === "response.output_audio_transcript.done" || type === "response.output_text.done") {
+  if (
+    type === "response.output_audio_transcript.done"
+    || type === "response.audio_transcript.done"
+    || type === "response.output_text.done"
+  ) {
     const text = String(payload.transcript ?? payload.text ?? "").trim();
     return text ? { role: "assistant", text } : null;
   }
@@ -44,8 +153,17 @@ function pcm16FromFloat32(input: Float32Array): ArrayBuffer {
 }
 
 function bytesToBase64(bytes: ArrayBuffer): string {
-  const bin = String.fromCharCode(...new Uint8Array(bytes));
+  const raw = new Uint8Array(bytes);
+  let bin = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < raw.length; i += chunk) {
+    bin += String.fromCharCode(...raw.subarray(i, i + chunk));
+  }
   return btoa(bin);
+}
+
+function closeAudio(ctx: AudioContext | null) {
+  if (ctx && ctx.state !== "closed") void ctx.close();
 }
 
 export class KirkVoiceSession {
@@ -62,10 +180,11 @@ export class KirkVoiceSession {
 
   constructor(private readonly handlers: VoiceHandlers) {}
 
-  async start(session: { wsPath: string; instructions: string; tools: unknown[]; voice?: string; model: string }) {
+  async start(session: { wsPath: string; instructions: string; tools: unknown[]; voice?: string; model: string; warehouseId?: string }) {
     this.stopped = false;
     this.started = false;
     this.assistantBuf = "";
+    this.playTime = 0;
     this.handlers.onStatus("connecting", "Connecting to Grok Voice…");
     try {
       this.media = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -73,8 +192,15 @@ export class KirkVoiceSession {
       this.handlers.onStatus("error", "Microphone permission is required for live voice.");
       return;
     }
+    this.inputCtx = new AudioContext({ sampleRate: 24000 });
+    this.outputCtx = new AudioContext({ sampleRate: 24000 });
+    await this.inputCtx.resume().catch(() => undefined);
+    await this.outputCtx.resume().catch(() => undefined);
     const protocol = location.protocol === "https:" ? "wss" : "ws";
-    const query = this.conversationId ? `?conversation_id=${encodeURIComponent(this.conversationId)}` : "";
+    const params = new URLSearchParams();
+    if (this.conversationId) params.set("conversation_id", this.conversationId);
+    if (session.warehouseId) params.set("warehouse_id", session.warehouseId);
+    const query = params.size ? `?${params}` : "";
     const url = `${protocol}://${location.host}/api${session.wsPath}${query}`;
     this.socket = new WebSocket(url);
     this.socket.addEventListener("message", (event) => {
@@ -102,8 +228,10 @@ export class KirkVoiceSession {
     this.stopped = true;
     this.processor?.disconnect();
     this.media?.getTracks().forEach((track) => track.stop());
-    void this.inputCtx?.close();
-    void this.outputCtx?.close();
+    closeAudio(this.inputCtx);
+    closeAudio(this.outputCtx);
+    this.inputCtx = null;
+    this.outputCtx = null;
     this.socket?.close();
     this.socket = null;
     this.handlers.onStatus("idle");
@@ -117,18 +245,15 @@ export class KirkVoiceSession {
       session: {
         voice: session.voice ?? "eve",
         instructions: session.instructions,
-        turn_detection: { type: "server_vad", silence_duration_ms: 600 },
+        turn_detection: { type: "server_vad", silence_duration_ms: VOICE_SILENCE_MS },
         audio: {
-          input: {
-            format: { type: "audio/pcm", rate: 24000 },
-            transcription: { model: "grok-transcribe" },
-          },
+          input: { format: { type: "audio/pcm", rate: 24000 } },
           output: { format: { type: "audio/pcm", rate: 24000 } },
         },
         tools: session.tools,
       },
     }));
-    this.handlers.onStatus("live", "Listening — speak after the waveform is live.");
+    this.handlers.onStatus("live", "Listening — speak and Kirk will answer out loud.");
     this.pumpMic();
   }
 
@@ -149,11 +274,11 @@ export class KirkVoiceSession {
     if ((type === "response.output_audio.delta" || type === "response.audio.delta") && typeof payload.delta === "string") {
       this.playDelta(payload.delta);
     }
-    if (type === "response.output_audio_transcript.delta" && typeof payload.delta === "string") {
-      this.assistantBuf += payload.delta;
+    if (type === "response.output_audio_transcript.delta" || type === "response.audio_transcript.delta") {
+      if (typeof payload.delta === "string") this.assistantBuf += payload.delta;
     }
-    if (type === "response.output_text.delta" && typeof payload.delta === "string") {
-      this.assistantBuf += payload.delta;
+    if (type === "kirk.products" && Array.isArray(payload.productIds)) {
+      this.handlers.onProducts?.(payload.productIds.map((id) => String(id)));
     }
     const line = voiceTranscriptFromEvent({
       ...payload,
@@ -172,8 +297,7 @@ export class KirkVoiceSession {
   }
 
   private pumpMic() {
-    if (!this.media) return;
-    this.inputCtx = new AudioContext({ sampleRate: 24000 });
+    if (!this.media || !this.inputCtx) return;
     const source = this.inputCtx.createMediaStreamSource(this.media);
     this.processor = this.inputCtx.createScriptProcessor(4096, 1, 1);
     const mute = this.inputCtx.createGain();
@@ -191,11 +315,13 @@ export class KirkVoiceSession {
 
   private playDelta(b64: string) {
     this.outputCtx ??= new AudioContext({ sampleRate: 24000 });
+    if (this.outputCtx.state === "suspended") void this.outputCtx.resume();
     const raw = Uint8Array.from(atob(b64), (ch) => ch.charCodeAt(0));
     const frames = raw.length / 2;
+    if (!frames) return;
     const buffer = this.outputCtx.createBuffer(1, frames, 24000);
     const channel = buffer.getChannelData(0);
-    const view = new DataView(raw.buffer);
+    const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
     for (let i = 0; i < frames; i += 1) {
       channel[i] = view.getInt16(i * 2, true) / 0x8000;
     }

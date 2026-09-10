@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { resampleTo24k, voiceTranscriptFromEvent } from "./voice-client";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { mergeVoiceUtterance, resampleTo24k, VoiceUtteranceBuffer, voiceTranscriptFromEvent } from "./voice-client";
 
 describe("voice client helpers", () => {
   it("resamples hardware-rate PCM down to 24 kHz", () => {
@@ -29,5 +29,41 @@ describe("voice client helpers", () => {
       type: "response.output_audio.delta",
       delta: "aaaa",
     })).toBeNull();
+  });
+});
+
+describe("voice utterance buffer", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("keeps the longer finished phrase when partials and duplicates arrive", () => {
+    expect(mergeVoiceUtterance("", "Okay show")).toBe("Okay show");
+    expect(mergeVoiceUtterance("Okay show", "Okay show it to me.")).toBe("Okay show it to me.");
+    expect(mergeVoiceUtterance("Okay show it to me.", "Okay show it to me.")).toBe("Okay show it to me.");
+    expect(mergeVoiceUtterance("Okay show it to me.", "Okay show")).toBe("Okay show it to me.");
+  });
+
+  it("commits one utterance only after 3 seconds of silence", () => {
+    vi.useFakeTimers();
+    const commits: string[] = [];
+    const buffer = new VoiceUtteranceBuffer((text) => commits.push(text));
+    buffer.hear("Okay show");
+    buffer.noteSpeech();
+    vi.advanceTimersByTime(500);
+    buffer.hear("Okay show it to me.");
+    buffer.hear("Okay show it to me.");
+    buffer.hear("Okay show it to me.");
+    vi.advanceTimersByTime(2999);
+    expect(commits).toEqual([]);
+    buffer.noteQuiet();
+    vi.advanceTimersByTime(2999);
+    expect(commits).toEqual([]);
+    vi.advanceTimersByTime(1);
+    expect(commits).toEqual(["Okay show it to me."]);
+    buffer.hear("Okay show it to me.");
+    buffer.noteQuiet();
+    vi.advanceTimersByTime(3000);
+    expect(commits).toEqual(["Okay show it to me."]);
   });
 });

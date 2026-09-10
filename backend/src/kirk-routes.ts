@@ -7,6 +7,7 @@ import { ApiError, data, memberKeyFrom, readJsonBody } from "./http.js";
 import {
   captureUnmetDemand,
   decidePurchase,
+  ensureProductImages,
   getFeedback,
   getKirkHome,
   listFeedback,
@@ -108,6 +109,12 @@ export function registerKirkRoutes(
     const itemId = String(input.itemId ?? "");
     if (!itemId) throw new ApiError(422, "VALIDATION_ERROR", "itemId is required");
     return c.json(data(await placePreorder(db, { itemId, memberKey: await keyFrom(c, input) })), 201);
+  });
+
+  app.post("/kirk/product-images", async (c) => {
+    const input = await readJsonBody(c);
+    const ids = Array.isArray(input.ids) ? input.ids.map((id) => String(id)) : [];
+    return c.json(data(await ensureProductImages(db, ids)));
   });
 
   app.post("/assistant/imagine", async (c) => {

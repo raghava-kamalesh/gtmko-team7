@@ -1,6 +1,12 @@
 import { WebSocketServer, WebSocket } from "ws";
 import type { Server } from "node:http";
-import { getStorefrontCatalog } from "./storefront-catalog.js";
+import {
+  getCatalogById,
+  getStorefrontCatalog,
+  searchStorefrontCatalog,
+  summarizeMatch,
+  withWarehouse,
+} from "./storefront-catalog.js";
 
 const VOICE_URL = "wss://api.x.ai/v1/realtime";
 const VOICE_MODEL = "grok-voice-latest";
@@ -9,13 +15,46 @@ export function kirkVoiceInstructions(warehouse: { id: string; name: string }, c
   const sample = getStorefrontCatalog().slice(0, 8).map((item) => `${item.id} ${item.name}`).join("; ");
   return [
     "You are Kirk, the Costco warehouse shopping assistant.",
+    "This is a live spoken conversation. Answer out loud, briefly, then keep listening.",
     `The member's warehouse is ${warehouse.name} (id ${warehouse.id}).`,
+    "When they ask for a product, call search_catalog, then recommend_products with matching ids so the storefront can show cards.",
     "Recommend only catalog items. Mention member price and stock when you know them.",
-    "You can add items to the cart with add_to_cart, summarize the cart, and capture unmet demand only after they agree to request a missing product.",
-    "If the member wants a visual of the cart, tell them to tap Imagine spread in the Kirk panel.",
+    "You can add items to the cart with add_to_cart, and capture unmet demand only after they agree to request a missing product.",
     cartSummary ? `Current cart: ${cartSummary}` : "The cart is empty.",
     `Example catalog ids: ${sample}`,
   ].join(" ");
+}
+
+export function executeVoiceTool(
+  name: string,
+  args: Record<string, unknown>,
+  warehouseId: string,
+): { output: unknown; productIds: string[] } {
+  if (name === "search_catalog") {
+    const matches = searchStorefrontCatalog(String(args.query ?? ""), {
+      category: typeof args.category === "string" ? args.category : undefined,
+      limit: typeof args.limit === "number" ? args.limit : 6,
+      warehouseId,
+    });
+    return { output: matches.map(summarizeMatch), productIds: matches.slice(0, 3).map((item) => item.id) };
+  }
+  if (name === "recommend_products") {
+    const ids = Array.isArray(args.product_ids) ? args.product_ids.map((id) => String(id)) : [];
+    const resolved = ids
+      .map((id) => getCatalogById(id))
+      .filter((item): item is NonNullable<typeof item> => Boolean(item))
+      .map((item) => withWarehouse(item, warehouseId))
+      .slice(0, 3);
+    return { output: { ok: true, products: resolved.map(summarizeMatch) }, productIds: resolved.map((item) => item.id) };
+  }
+  if (name === "add_to_cart") {
+    const productId = String(args.product_id ?? "");
+    return { output: { ok: true, product_id: productId }, productIds: productId ? [productId] : [] };
+  }
+  if (name === "capture_unmet_demand") {
+    return { output: { ok: true, queued: true }, productIds: [] };
+  }
+  return { output: { error: `Unknown tool ${name}` }, productIds: [] };
 }
 
 export function kirkVoiceTools() {
@@ -121,6 +160,7 @@ async function proxyVoiceSession(client: WebSocket, url: URL) {
 
   const model = process.env.XAI_VOICE_MODEL ?? VOICE_MODEL;
   const conversationId = url.searchParams.get("conversation_id");
+  const warehouseId = url.searchParams.get("warehouse_id") || "w1";
   const upstreamUrl = `${process.env.XAI_VOICE_URL ?? VOICE_URL}?model=${encodeURIComponent(model)}${conversationId ? `&conversation_id=${encodeURIComponent(conversationId)}` : ""}`;
   const queued: Array<{ data: WebSocket.RawData; binary: boolean }> = [];
   const upstream = new WebSocket(upstreamUrl, { headers: { Authorization: `Bearer ${apiKey}` } });
@@ -149,6 +189,17 @@ async function proxyVoiceSession(client: WebSocket, url: URL) {
     }
   });
   upstream.on("message", (data, isBinary) => {
+    if (!isBinary) {
+      const text = typeof data === "string" ? data : data.toString();
+      try {
+        const payload = JSON.parse(text) as Record<string, unknown>;
+        if (payload.type === "response.function_call_arguments.done") {
+          fulfillVoiceTool(upstream, client, payload, warehouseId);
+        }
+      } catch {
+        // Forward non-JSON text as-is.
+      }
+    }
     if (client.readyState === WebSocket.OPEN) client.send(data, { binary: isBinary });
   });
   upstream.on("close", (code, reason) => {
@@ -165,4 +216,27 @@ async function proxyVoiceSession(client: WebSocket, url: URL) {
     }
     closeVoicePeer(client, 1011, "voice_proxy_error");
   });
+}
+
+function fulfillVoiceTool(
+  upstream: WebSocket,
+  client: WebSocket,
+  payload: Record<string, unknown>,
+  warehouseId: string,
+) {
+  const name = String(payload.name ?? payload.function_name ?? "");
+  const callId = String(payload.call_id ?? payload.id ?? "");
+  let args: Record<string, unknown> = {};
+  try { args = JSON.parse(String(payload.arguments ?? "{}")) as Record<string, unknown>; } catch { args = {}; }
+  const result = executeVoiceTool(name, args, warehouseId);
+  if (upstream.readyState === WebSocket.OPEN && callId) {
+    upstream.send(JSON.stringify({
+      type: "conversation.item.create",
+      item: { type: "function_call_output", call_id: callId, output: JSON.stringify(result.output) },
+    }));
+    upstream.send(JSON.stringify({ type: "response.create" }));
+  }
+  if (client.readyState === WebSocket.OPEN && result.productIds.length) {
+    client.send(JSON.stringify({ type: "kirk.products", productIds: result.productIds }));
+  }
 }
