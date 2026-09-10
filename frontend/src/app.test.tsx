@@ -10,6 +10,7 @@ const open = (path = "/") => {
 
 describe("Costco commerce journeys", () => {
   beforeEach(() => localStorage.clear());
+  afterEach(() => vi.unstubAllGlobals());
 
   it("selects and persists a warehouse", async () => {
     const user = userEvent.setup(); open();
@@ -105,9 +106,11 @@ describe("Costco commerce journeys", () => {
       inStock: true,
     };
     const bodies: unknown[] = [];
+    const urls: string[] = [];
     vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.includes("/assistant/chat")) {
+        urls.push(url);
         bodies.push(JSON.parse(String(init?.body ?? "{}")));
         return new Response(JSON.stringify({
           data: {
@@ -142,10 +145,38 @@ describe("Costco commerce journeys", () => {
     expect(within(stillOpen).getByText("I need a 65 inch TV")).toBeInTheDocument();
     const later = [...stillOpen.querySelectorAll(".assistant-msg")].map((node) => node.textContent ?? "");
     expect(later.findIndex((text) => text.includes("Open Sony"))).toBeLessThan(later.findIndex((text) => /Opening the product page/.test(text)));
+    expect(urls[0]).toMatch(/\/api\/assistant\/chat$/);
     expect(bodies[0]).toMatchObject({
       messages: [{ role: "user", content: "I need a 65 inch TV" }],
       warehouse: { name: "Brooklyn" },
     });
+  });
+
+  it("sends typed chat after a messy voice transcript", async () => {
+    localStorage.setItem("costco-assistant-chat", JSON.stringify([
+      { id: "empty", role: "user", text: "   " },
+      { id: "heard", role: "assistant", text: "I can hear you." },
+    ]));
+    const bodies: Array<{ messages: Array<{ role: string; content: string }> }> = [];
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/assistant/chat")) {
+        bodies.push(JSON.parse(String(init?.body ?? "{}")));
+        return new Response(JSON.stringify({
+          data: { reply: "The 65-inch is in stock.", recommendations: [], askToView: false },
+        }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ error: { message: url } }), { status: 404 });
+    });
+    const user = userEvent.setup();
+    open();
+    await user.click(screen.getByRole("button", { name: "Kirk assistant" }));
+    const panel = screen.getByRole("dialog", { name: "Kirk" });
+    await user.type(within(panel).getByLabelText("Ask Kirk"), "I need a 65 inch TV");
+    await user.keyboard("{Enter}");
+    expect(await within(panel).findByText(/65-inch is in stock/)).toBeInTheDocument();
+    expect(bodies[0]?.messages.at(-1)).toEqual({ role: "user", content: "I need a 65 inch TV" });
+    expect(bodies[0]?.messages.some((message) => !message.content.trim())).toBe(false);
   });
 
   it("keeps chat moving and swaps in a product photo when Imagine returns", async () => {

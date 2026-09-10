@@ -1,10 +1,12 @@
 import { createContext, useContext, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 import {
+  ApiError,
   captureKirkDemand,
   createVoiceSession,
   sendAssistantChat,
   submitKirkFeedback,
+  type AssistantChatMessage,
 } from "./api";
 import { useStore } from "./store";
 import type { Product } from "./types";
@@ -43,6 +45,22 @@ export function insertAfterLine(lines: ChatLine[], afterId: string | undefined, 
   const index = afterId ? lines.findIndex((item) => item.id === afterId) : -1;
   if (index === -1) return [...lines, line];
   return [...lines.slice(0, index + 1), line, ...lines.slice(index + 1)];
+}
+
+export const MAX_CHAT_TURNS = 30;
+export const MAX_CHAT_CHARS = 4000;
+
+export function chatMessagesFromLines(lines: ChatLine[], lastUserText?: string): AssistantChatMessage[] {
+  const cleaned: AssistantChatMessage[] = lines
+    .filter((line) => (line.role === "user" || line.role === "assistant") && line.text.trim())
+    .map((line) => ({ role: line.role, content: line.text.trim().slice(0, MAX_CHAT_CHARS) }))
+    .slice(-MAX_CHAT_TURNS);
+  const trimmed = lastUserText?.trim().slice(0, MAX_CHAT_CHARS);
+  if (trimmed && cleaned.at(-1)?.content !== trimmed) {
+    cleaned.push({ role: "user", content: trimmed });
+  }
+  while (cleaned.length && cleaned.at(-1)?.role !== "user") cleaned.pop();
+  return cleaned;
 }
 
 export function upsertVoiceLine(lines: ChatLine[], role: ChatLine["role"], text: string, extra?: Partial<ChatLine>): ChatLine[] {
@@ -127,7 +145,9 @@ function AssistantWidget({ open, pending, onConsumed, onClose, onOpen }: {
   const [voiceStatus, setVoiceStatus] = useState<VoiceStatus>("idle");
   const [voiceDetail, setVoiceDetail] = useState("");
   const log = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
   const linesRef = useRef(lines);
+  const busyRef = useRef(false);
   const handledPending = useRef<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const voiceRef = useRef<KirkVoiceSession | null>(null);
@@ -137,6 +157,9 @@ function AssistantWidget({ open, pending, onConsumed, onClose, onOpen }: {
   const opened = useRef(false);
   useEffect(() => { localStorage.setItem(CHAT_KEY, JSON.stringify(lines)); }, [lines]);
   useEffect(() => { log.current?.scrollTo?.({ top: log.current.scrollHeight }); }, [lines, busy, open]);
+  useEffect(() => {
+    if (open) inputRef.current?.focus();
+  }, [open]);
 
   const productById = (id: string) => products.find((item) => item.id === id);
   const memberKey = user?.email ?? "demo";
@@ -175,17 +198,20 @@ function AssistantWidget({ open, pending, onConsumed, onClose, onOpen }: {
   }, [open, lines]);
 
   const sendTurn = async (text: string, image?: { mimeType: string; data: string; preview: string }, options?: { userAlreadyListed?: boolean }) => {
-    if (busy) return;
+    if (busyRef.current) return;
     const existingUser = options?.userAlreadyListed
       ? [...linesRef.current].reverse().find((line) => line.role === "user" && line.text === text)
       : undefined;
     const userLine = existingUser ?? { id: newId(), role: "user" as const, text, imageUrl: image?.preview };
     if (!existingUser) commitLines([...linesRef.current, userLine]);
-    const history = linesRef.current;
+    if (!image && voiceRef.current?.sendText(text)) return;
+    const messages = chatMessagesFromLines(linesRef.current, text);
+    if (!messages.length) return;
+    busyRef.current = true;
     setBusy(true);
     try {
       const result = await sendAssistantChat({
-        messages: history.map((line) => ({ role: line.role, content: line.text })),
+        messages,
         warehouse: { id: warehouse.id, name: warehouse.name },
         cart: cart.map((item) => {
           const product = productById(item.productId);
@@ -195,31 +221,35 @@ function AssistantWidget({ open, pending, onConsumed, onClose, onOpen }: {
         image: image ? { mimeType: image.mimeType, data: image.data } : undefined,
       });
       applyCartActions(result.cartActions);
-      const matched = result.recommendations
+      const matched = (result.recommendations ?? [])
         .map((item) => productById(item.id))
         .filter((item): item is Product => Boolean(item));
       void ensureProductImages(matched.map((item) => item.id));
       const primary = matched[0];
-      let reply = result.reply.trim();
+      let reply = (result.reply ?? "").trim();
       if (result.unmetDemand && !/sent that request|inventor/i.test(reply)) {
         reply = `${reply} I sent that request to merch so they can review adding it to inventory.`.trim();
       }
       commitLines(insertAfterLine(linesRef.current, userLine.id, {
         id: newId(),
         role: "assistant",
-        text: reply,
+        text: reply || "I can recommend items from this warehouse catalog. Tell me what you need.",
         productIds: matched.map((item) => item.id),
         awaitingView: Boolean(primary) && !result.askToRequestInventory,
         awaitingInventoryRequest: Boolean(result.askToRequestInventory) && !primary,
         imagineUrl: result.imagineUrl,
       }));
-    } catch {
+    } catch (error) {
+      const detail = error instanceof ApiError ? error.message : "";
       commitLines(insertAfterLine(linesRef.current, userLine.id, {
         id: newId(),
         role: "assistant",
-        text: "I couldn't reach Kirk just now. Check that the API has an XAI_API_KEY, then try again.",
+        text: detail && !/XAI_API_KEY|not configured/i.test(detail)
+          ? `I couldn't complete that: ${detail}`
+          : "I couldn't reach Kirk just now. Try again in a moment.",
       }));
     } finally {
+      busyRef.current = false;
       setBusy(false);
     }
   };
@@ -281,7 +311,7 @@ function AssistantWidget({ open, pending, onConsumed, onClose, onOpen }: {
   const submit = (e: FormEvent) => {
     e.preventDefault();
     const text = input.trim();
-    if (!text || busy) return;
+    if (!text || busyRef.current) return;
     setInput("");
     void handleUserText(text);
   };
@@ -450,7 +480,16 @@ function AssistantWidget({ open, pending, onConsumed, onClose, onOpen }: {
       </div>
       <form className="assistant-dock" onSubmit={submit}>
         <div className={`assistant-wave${voiceStatus === "live" ? " is-live" : ""}`} aria-hidden="true">{[8, 16, 28, 18, 34, 14, 24, 10, 20, 12].map((h, i) => <i key={i} style={{ height: h }} />)}</div>
-        <label className="assistant-field">Ask Kirk<input value={input} onChange={(e) => setInput(e.target.value)} placeholder="Ask about items, stock, or your cart" disabled={busy} /></label>
+        <label className="assistant-field">Ask Kirk
+          <input
+            ref={inputRef}
+            type="text"
+            aria-label="Ask Kirk"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder="Ask about items, stock, or your cart"
+          />
+        </label>
         <input ref={fileRef} type="file" accept="image/*" hidden onChange={(e) => { const file = e.target.files?.[0]; if (file) void onPickImage(file); e.target.value = ""; }} />
         <button className="primary" type="submit" disabled={busy}>Send</button>
         <small>{voiceStatus === "live" ? "Kirk is listening — speak and I will answer out loud" : `Cart ${cartCount} · $${cartTotal.toFixed(2)}`}</small>

@@ -224,6 +224,25 @@ export class KirkVoiceSession {
     });
   }
 
+  isLive() {
+    return Boolean(this.socket && this.socket.readyState === WebSocket.OPEN && this.started && !this.stopped);
+  }
+
+  sendText(text: string) {
+    const trimmed = text.trim();
+    if (!trimmed || !this.isLive() || !this.socket) return false;
+    this.socket.send(JSON.stringify({
+      type: "conversation.item.create",
+      item: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: trimmed }],
+      },
+    }));
+    this.socket.send(JSON.stringify({ type: "response.create" }));
+    return true;
+  }
+
   stop() {
     this.stopped = true;
     this.processor?.disconnect();
